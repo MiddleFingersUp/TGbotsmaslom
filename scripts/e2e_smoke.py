@@ -197,9 +197,23 @@ async def seed_fixture(agent_model: str | None) -> tuple[UUID, UUID]:
 
 
 async def run_two_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]:
-    """Two dialog turns via the REAL use case + AgentLoop; report dicts only."""
+    """Three dialog turns via the REAL use case + AgentLoop; report dicts only.
+
+    Stage 6.2: the loop uses the PRODUCTION registry (real retrieval tools).
+    Expected story:
+    1. 'Привет!'                          → no tools;
+    2. 'Сколько стоит стрижка женская?'   → search_services → price from the
+       SEEDED catalog ('1500.00');
+    3. 'Полёт на марс?'                   → honest refusal (results=[] or a
+       polite no-data text, never an invented price).
+    """
+    import re
+
     from src.agent_core.agent_loop import AgentLoop
-    from src.application.process_incoming_message import ProcessIncomingMessageUseCase
+    from src.application.process_incoming_message import (
+        ProcessIncomingMessageUseCase,
+        build_default_registry,
+    )
     from src.config.settings import get_settings
     from src.db.models.agents import Agent as AgentModel
     from src.db.models.conversations import Conversation
@@ -207,17 +221,16 @@ async def run_two_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]
     from src.db.models.messages import Message
     from src.db.models.tenants import Tenant
     from src.db.models.token_usage import TokenUsage as TokenUsageRow
-    from src.db.repositories.repositories import MessageRepository
     from src.db.session import get_session_factory
     from src.llm_providers.factory import LLMProviderFactory
     from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
-    from src.tools.stubs import build_default_stub_registry
 
     settings = get_settings()
     provider = LLMProviderFactory.from_settings(settings)
-    loop = AgentLoop(provider, build_default_stub_registry())
+    loop = AgentLoop(provider, build_default_registry())
 
-    inputs = ["Привет!", "Сколько стоит стрижка женская?"]
+    inputs = ["Привет!", "Сколько стоит стрижка женская?", "Полёт на марс?"]
+    expected_price_token = "1500"  # seeded fixture value for Стрижка женская
     report: list[dict[str, Any]] = []
 
     factory = get_session_factory()
@@ -279,7 +292,17 @@ async def run_two_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]
             agent_rows = [m for m in history if m.role.value == "agent"]
             usage_total = sum(row.prompt_tokens + row.completion_tokens for row in usage_rows)
 
-            _ = MessageRepository  # imported for contract clarity (history via use case)
+            price_tokens_found = (
+                re.findall(rf"\b{expected_price_token}(?:[.,]\d{{2}})?\b", result.response_text)
+                if "стоимость" in text or "стоит" in text
+                else []
+            )
+            tool_names = [
+                entry.get("name")
+                for meta in (m.meta for m in agent_rows if m.meta)
+                for entry in meta.get("tools", [])
+            ]
+
             report.append(
                 {
                     "turn": index + 1,
@@ -289,6 +312,8 @@ async def run_two_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]
                     "handoff_active": bool(conversation.handoff_active) if conversation else "?",
                     "agent_meta": [m.meta for m in agent_rows if m.meta],
                     "agent_ai_models": [m.ai_model for m in agent_rows if m.ai_model],
+                    "tools_used": tool_names,
+                    "price_tokens": price_tokens_found,
                     "usage_rows_tenant_total": len(usage_rows),
                     "usage_total_admin": usage_total,
                 }
@@ -484,6 +509,9 @@ async def main() -> int:
             _prints(f"  ANSWER: {turn['response'][:300]}")
             _prints(f"  STATE: {turn['state']} | handoff_active: {turn['handoff_active']}")
             _prints(f"  AI_MODELS: {turn['agent_ai_models']}")
+            _prints(f"  TOOLS_USED: {turn['tools_used']}")
+            if turn["price_tokens"]:
+                _prints(f"  PRICE_FROM_CATALOG: token {turn['price_tokens']} найден в ответе")
             _prints(f"  TOOL_META: {json.dumps(turn['agent_meta'], ensure_ascii=False)}")
             _prints(
                 f"  TOKEN_USAGE: rows(this tenant)={turn['usage_rows_tenant_total']} "

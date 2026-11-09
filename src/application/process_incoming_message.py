@@ -36,6 +36,10 @@ from src.db.repositories.repositories import (
 )
 from src.monitoring.logging import get_logger
 from src.telegram_adapter.schemas import IncomingMessage
+from src.tools.registry import ToolRegistry
+from src.tools.search_faq import SearchFAQTool
+from src.tools.search_services import SearchServicesTool
+from src.tools.stubs import HandoffRequestTool, SaveLeadTool
 
 if TYPE_CHECKING:
     from src.agent_core.agent_loop import AgentLoop
@@ -55,19 +59,30 @@ class ProcessMessageResult:
     is_duplicate: bool = False
 
 
-def _build_default_agent_loop() -> AgentLoop:
-    """Default loop: provider from platform settings + stub tool registry.
+def build_default_registry() -> ToolRegistry:
+    """Production tool registry (docs/DEVELOPMENT_PLAN.md Stage 6.2).
 
-    The stub registry is replaced by real tools in Stages 6-7
-    (docs/DEVELOPMENT_PLAN.md Stage 5).
+    REAL tools (Stage 6.2): search_services / search_faq — PostgreSQL
+    retrieval via PostgresRetrievalService.
+    Stage-7 stubs remain until leads & handoff land (unchanged contract).
+    The Stage-5.1 stub registry stays available for offline unit tests.
     """
+    registry = ToolRegistry()
+    registry.register(SearchServicesTool())
+    registry.register(SearchFAQTool())
+    registry.register(SaveLeadTool())
+    registry.register(HandoffRequestTool())
+    return registry
+
+
+def _build_default_agent_loop() -> AgentLoop:
+    """Default loop: provider from platform settings + the production registry."""
     from src.agent_core.agent_loop import AgentLoop
     from src.config.settings import get_settings
     from src.llm_providers.factory import LLMProviderFactory
-    from src.tools.stubs import build_default_stub_registry
 
     provider = LLMProviderFactory.from_settings(get_settings())
-    return AgentLoop(provider, build_default_stub_registry())
+    return AgentLoop(provider, build_default_registry())
 
 
 class ProcessIncomingMessageUseCase:
