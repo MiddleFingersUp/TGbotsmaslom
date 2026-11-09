@@ -16,7 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import HandoffStatus, HandoffTrigger
+from src.db.models.enums import HandoffStatus, HandoffTrigger, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.conversations import Conversation
@@ -45,11 +45,21 @@ class Handoff(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         index=True,
     )
     trigger: Mapped[HandoffTrigger] = mapped_column(
-        Enum(HandoffTrigger, name="handoff_trigger", native_enum=True),
+        Enum(
+            HandoffTrigger,
+            name="handoff_trigger",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         nullable=False,
     )
     status: Mapped[HandoffStatus] = mapped_column(
-        Enum(HandoffStatus, name="handoff_status", native_enum=True),
+        Enum(
+            HandoffStatus,
+            name="handoff_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=HandoffStatus.ACTIVE,
         nullable=False,
     )

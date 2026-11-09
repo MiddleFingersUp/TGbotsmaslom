@@ -16,7 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import SecretSource
+from src.db.models.enums import SecretSource, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.tenants import Tenant
@@ -44,7 +44,12 @@ class Bot(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     bot_username: Mapped[str] = mapped_column(String(255), nullable=False)
     secret_source: Mapped[SecretSource] = mapped_column(
-        Enum(SecretSource, name="secret_source", native_enum=True),
+        Enum(
+            SecretSource,
+            name="secret_source",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=SecretSource.ENV,
         nullable=False,
     )

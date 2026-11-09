@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import ServiceStatus
+from src.db.models.enums import ServiceStatus, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.tenants import Tenant
@@ -68,7 +68,12 @@ class Service(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, nullable=False)
     status: Mapped[ServiceStatus] = mapped_column(
-        Enum(ServiceStatus, name="service_status", native_enum=True),
+        Enum(
+            ServiceStatus,
+            name="service_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=ServiceStatus.ACTIVE,
         nullable=False,
     )

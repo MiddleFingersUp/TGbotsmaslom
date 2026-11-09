@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import LeadSource, LeadStatus
+from src.db.models.enums import LeadSource, LeadStatus, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.conversations import Conversation
@@ -68,12 +68,22 @@ class Lead(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     contact_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     intent: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[LeadStatus] = mapped_column(
-        Enum(LeadStatus, name="lead_status", native_enum=True),
+        Enum(
+            LeadStatus,
+            name="lead_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=LeadStatus.NEW,
         nullable=False,
     )
     source: Mapped[LeadSource] = mapped_column(
-        Enum(LeadSource, name="lead_source", native_enum=True),
+        Enum(
+            LeadSource,
+            name="lead_source",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=LeadSource.AGENT,
         nullable=False,
     )

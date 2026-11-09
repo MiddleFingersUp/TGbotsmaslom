@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, UUIDPrimaryKeyMixin
-from src.db.models.enums import MessageRole
+from src.db.models.enums import MessageRole, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.conversations import Conversation
@@ -54,7 +54,12 @@ class Message(Base, UUIDPrimaryKeyMixin):
         index=True,
     )
     role: Mapped[MessageRole] = mapped_column(
-        Enum(MessageRole, name="message_role", native_enum=True),
+        Enum(
+            MessageRole,
+            name="message_role",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         nullable=False,
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)

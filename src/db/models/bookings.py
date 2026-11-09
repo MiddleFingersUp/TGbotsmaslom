@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import BookingStatus
+from src.db.models.enums import BookingStatus, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.conversations import Conversation
@@ -71,7 +71,12 @@ class Booking(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[BookingStatus] = mapped_column(
-        Enum(BookingStatus, name="booking_status", native_enum=True),
+        Enum(
+            BookingStatus,
+            name="booking_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=BookingStatus.REQUESTED,
         nullable=False,
     )

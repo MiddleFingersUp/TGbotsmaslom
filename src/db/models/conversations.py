@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import ConversationState
+from src.db.models.enums import ConversationState, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.agents import Agent
@@ -53,7 +53,12 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
     state: Mapped[ConversationState] = mapped_column(
-        Enum(ConversationState, name="conversation_state", native_enum=True),
+        Enum(
+            ConversationState,
+            name="conversation_state",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=ConversationState.GREETING,
         nullable=False,
     )

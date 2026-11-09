@@ -118,11 +118,22 @@ def _preflight_llm() -> bool:
 
 
 async def seed_fixture(agent_model: str | None) -> tuple[UUID, UUID]:
-    """Create (or reset) the fixture tenant + active agent; return (tenant_id, agent_id)."""
+    """Create (or reset) the fixture tenant + active agent; return (tenant_id, agent_id).
+
+    Re-runs are fully idempotent: previous dialog facts (token_usage,
+    bookings, handoffs, leads, conversations+messages, customers) are
+    deleted in FK-safe order, then the tenant is recreated fresh.
+    """
     from src.config.settings import get_settings
     from src.db.models.agents import Agent
+    from src.db.models.bookings import Booking
+    from src.db.models.conversations import Conversation
+    from src.db.models.customers import Customer
+    from src.db.models.handoffs import Handoff
+    from src.db.models.leads import Lead
     from src.db.models.services import Service
     from src.db.models.tenants import Tenant
+    from src.db.models.token_usage import TokenUsage
     from src.db.session import get_session_factory
 
     get_settings()  # refresh settings snapshot from env (LLM_*, DATABASE_URL)
@@ -131,18 +142,26 @@ async def seed_fixture(agent_model: str | None) -> tuple[UUID, UUID]:
 
     factory = get_session_factory()
     async with factory() as session, session.begin():
-        tenant = await session.get(Tenant, tenant_id)
-        if tenant is None:
-            tenant = Tenant(
-                id=tenant_id,
-                name=f"E2E Smoke fixture ({agent_model or 'default-model'})",
-            )
-            session.add(tenant)
-            await session.flush()
+        # FK-safe purge of the previous run for this fixture tenant
+        for delete_stmt in (
+            delete(TokenUsage).where(TokenUsage.tenant_id == tenant_id),
+            delete(Booking).where(Booking.tenant_id == tenant_id),
+            delete(Handoff).where(Handoff.tenant_id == tenant_id),
+            delete(Lead).where(Lead.tenant_id == tenant_id),
+            delete(Conversation).where(Conversation.tenant_id == tenant_id),
+            delete(Customer).where(Customer.tenant_id == tenant_id),
+            delete(Service).where(Service.tenant_id == tenant_id),
+            delete(Agent).where(Agent.tenant_id == tenant_id),
+        ):
+            await session.execute(delete_stmt)
+        await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
 
-        # Idempotency: reset this tenant's agent/service rows; keep tenant.
-        await session.execute(delete(Agent).where(Agent.tenant_id == tenant_id))
-        await session.execute(delete(Service).where(Service.tenant_id == tenant_id))
+        tenant = Tenant(
+            id=tenant_id,
+            name=f"E2E Smoke fixture ({agent_model or 'default-model'})",
+        )
+        session.add(tenant)
+        await session.flush()
 
         agent = Agent(
             id=agent_id,

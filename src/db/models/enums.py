@@ -98,3 +98,15 @@ class SecretSource(enum.StrEnum):
     ENV = "env"
     CIPHER = "cipher"
     VAULT = "vault"
+
+
+def pg_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    """Persist `.value` strings (lowercase per DATABASE.md §3), not `.name`.
+
+    SQLAlchemy `Enum()` stores a member's `.name` by default (e.g. "ACTIVE"),
+    while migrations create PostgreSQL ENUM types with the lowercase values
+    ("active"). Without this callable every enum INSERT against a real
+    PostgreSQL fails with InvalidTextRepresentationError — the bug surfaced
+    only during the Stage 5.3 live E2E (mock sessions could not catch it).
+    """
+    return [member.value for member in enum_cls]

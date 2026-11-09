@@ -7,7 +7,7 @@ from sqlalchemy import Enum, ForeignKey, Index, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import DocumentStatus
+from src.db.models.enums import DocumentStatus, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.tenants import Tenant
@@ -30,7 +30,12 @@ class KnowledgeDocument(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     source_type: Mapped[str] = mapped_column(String(50), default="manual", nullable=False)
     source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(
-        Enum(DocumentStatus, name="document_status", native_enum=True),
+        Enum(
+            DocumentStatus,
+            name="document_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=DocumentStatus.DRAFT,
         nullable=False,
     )

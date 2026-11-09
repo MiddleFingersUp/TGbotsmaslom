@@ -6,7 +6,7 @@ from sqlalchemy import Boolean, CheckConstraint, Enum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from src.db.models.enums import TenantStatus
+from src.db.models.enums import TenantStatus, pg_enum_values
 
 if TYPE_CHECKING:
     from src.db.models.agents import Agent
@@ -29,7 +29,12 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     status: Mapped[TenantStatus] = mapped_column(
-        Enum(TenantStatus, name="tenant_status", native_enum=True),
+        Enum(
+            TenantStatus,
+            name="tenant_status",
+            native_enum=True,
+            values_callable=pg_enum_values,
+        ),
         default=TenantStatus.ACTIVE,
         nullable=False,
         index=True,
