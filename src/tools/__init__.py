@@ -1,1 +1,1 @@
-"""Tool execution layer and registry."""
+"""Tool execution layer: registry, validation, and deterministic stubs."""

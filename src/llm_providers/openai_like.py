@@ -1,20 +1,25 @@
 """OpenAI-compatible Chat Completions adapter.
 
-Implements docs/DEVELOPMENT_PLAN.md Stage 4:
+Implements docs/DEVELOPMENT_PLAN.md Stage 4 (basic chat completion) and
+Stage 5 §5.1 (tool calls):
 - base URL / API key / model come exclusively from configuration;
 - per-request and provider-wide timeouts;
 - bounded retries with exponential backoff + jitter for transient errors;
-- response normalization into `LLMResponse` (missing usage stays `None`);
-- secrets, authorization headers and request bodies are never logged
-  (docs/SECURITY.md §3, §8).
+- advertised `tools` are passed through to the payload when present;
+- responses normalize into `LLMResponse`; `message.tool_calls` requests are
+  mapped into `ToolCall` objects and count as a valid non-empty outcome;
+- missing usage stays `None`; secrets, authorization headers and request
+  bodies are never logged (docs/SECURITY.md §3, §8).
 
-Tool calling, streaming and multimodal features are intentionally NOT
-implemented in the MVP.
+Streaming and multimodal features are intentionally NOT implemented.
+Only a single request/response is performed — the tool-call loop belongs
+to Agent Core (Stage 5.2), not to the adapter.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from typing import Any
 
@@ -33,7 +38,7 @@ from src.llm_providers.exceptions import (
     LLMTimeoutError,
 )
 from src.llm_providers.privacy import NoOpPrivacyFilter, PrivacyFilter
-from src.llm_providers.schemas import LLMRequest, LLMResponse, TokenUsage
+from src.llm_providers.schemas import LLMRequest, LLMResponse, TokenUsage, ToolCall
 from src.monitoring.logging import get_logger
 
 logger = get_logger("llm_providers.openai_like")
@@ -128,6 +133,8 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
+        if request.tools:
+            payload["tools"] = [spec.to_vendor_format() for spec in request.tools]
         payload.update(request.extra_params)
         return payload
 
@@ -222,7 +229,11 @@ class OpenAICompatibleProvider(LLMProvider):
     # ─── Normalization ────────────────────────────────────────────────
 
     def _normalize(self, data: dict[str, Any]) -> LLMResponse:
-        """Convert a vendor JSON object into the normalized `LLMResponse`."""
+        """Convert a vendor JSON object into the normalized `LLMResponse`.
+
+        A response with `message.tool_calls` is valid even with empty content;
+        without tool calls, empty content is an `LLMEmptyResponseError`.
+        """
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise LLMEmptyResponseError(
@@ -234,8 +245,14 @@ class OpenAICompatibleProvider(LLMProvider):
                 "LLM endpoint returned an invalid choice structure.", provider=self.provider_name
             )
         message = choice.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(message, dict):
+            message = {}
+        content = message.get("content")
+        tool_calls = self._parse_tool_calls(message)
+
+        # Without tool calls, blank content is an empty response (ARCH §11).
+        is_empty = not isinstance(content, str) or not content.strip()
+        if not tool_calls and is_empty:
             raise LLMEmptyResponseError(
                 "LLM endpoint returned an empty response.", provider=self.provider_name
             )
@@ -254,14 +271,60 @@ class OpenAICompatibleProvider(LLMProvider):
         request_id = data.get("id")
         finish_reason = choice.get("finish_reason")
         return LLMResponse(
-            content=content,
+            content=content if isinstance(content, str) else "",
             model=str(data.get("model") or "unknown"),
             provider=self.provider_name,
             finish_reason=finish_reason if isinstance(finish_reason, str) else None,
             usage=usage,
             request_id=request_id if isinstance(request_id, str) else None,
             metadata={"created": data.get("created"), "object": data.get("object")},
+            tool_calls=tool_calls or None,
         )
+
+    def _parse_tool_calls(self, message: dict[str, Any]) -> list[ToolCall]:
+        """Extract and validate `message.tool_calls` into normalized `ToolCall`s.
+
+        The vendor format wraps each call as
+        `{"id": ..., "type": "function", "function": {"name": ..., "arguments": "<json str>"}}`.
+        Arguments must be a JSON **object**; malformed JSON is a domain error
+        (LLMInvalidRequestError) — the response is never silently mangled.
+        """
+        raw_calls = message.get("tool_calls")
+        if raw_calls is None:
+            return []
+        if not isinstance(raw_calls, list):
+            raise LLMInvalidRequestError(
+                "LLM endpoint returned an invalid tool_calls structure.",
+                provider=self.provider_name,
+            )
+
+        normalized: list[ToolCall] = []
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                raise LLMInvalidRequestError(
+                    "LLM endpoint returned an invalid tool call entry.",
+                    provider=self.provider_name,
+                )
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                raise LLMInvalidRequestError(
+                    "LLM tool call is missing the 'function' object.",
+                    provider=self.provider_name,
+                )
+            name = function.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise LLMInvalidRequestError(
+                    "LLM tool call is missing a valid function name.",
+                    provider=self.provider_name,
+                )
+            normalized.append(
+                ToolCall(
+                    id=raw_call.get("id") if isinstance(raw_call.get("id"), str) else None,
+                    name=name,
+                    arguments=_parse_arguments(function.get("arguments")),
+                )
+            )
+        return normalized
 
     # ─── Retry backoff ────────────────────────────────────────────────
 
@@ -284,6 +347,32 @@ def _positive_or_none(mapping: dict[str, Any], key: str) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+def _parse_arguments(raw_arguments: Any) -> dict[str, Any]:
+    """Parse tool call arguments: a JSON object string or an already-parsed dict.
+
+    Non-object values and malformed JSON raise `LLMInvalidRequestError`;
+    the raw value is never included in the log or error message (SECURITY §8).
+    """
+    if raw_arguments is None:
+        return {}
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = json.loads(raw_arguments)
+        except ValueError as error:
+            raise LLMInvalidRequestError(
+                "LLM tool call arguments are not valid JSON.",
+                provider="openai_compatible",
+            ) from error
+        if isinstance(parsed, dict):
+            return parsed
+    raise LLMInvalidRequestError(
+        "LLM tool call arguments must be a JSON object.",
+        provider="openai_compatible",
+    )
 
 
 async def _sleep(seconds: float) -> None:

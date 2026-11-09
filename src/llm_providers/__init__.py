@@ -16,7 +16,14 @@ from src.llm_providers.factory import LLMProviderFactory
 from src.llm_providers.mock import MockLLMProvider
 from src.llm_providers.openai_like import OpenAICompatibleProvider
 from src.llm_providers.privacy import NoOpPrivacyFilter, PrivacyFilter
-from src.llm_providers.schemas import LLMMessage, LLMRequest, LLMResponse, TokenUsage
+from src.llm_providers.schemas import (
+    LLMMessage,
+    LLMRequest,
+    LLMResponse,
+    TokenUsage,
+    ToolCall,
+    ToolSpec,
+)
 
 __all__ = [
     "LLMAuthenticationError",
@@ -38,4 +45,6 @@ __all__ = [
     "OpenAICompatibleProvider",
     "PrivacyFilter",
     "TokenUsage",
+    "ToolCall",
+    "ToolSpec",
 ]

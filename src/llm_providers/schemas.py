@@ -24,6 +24,45 @@ class LLMMessage(BaseModel):
     content: str = Field(min_length=1)
 
 
+class ToolSpec(BaseModel):
+    """Provider-agnostic tool description sent to the LLM (ARCHITECTURE §11).
+
+    `parameters_json_schema` is a JSON-Schema object describing the tool input;
+    it is generated from each tool's Pydantic `input_schema` by the registry.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$", min_length=1, max_length=64)
+    description: str = Field(min_length=1)
+    parameters_json_schema: dict[str, Any]
+
+    def to_vendor_format(self) -> dict[str, Any]:
+        """Return the OpenAI-compatible `{"type": "function", "function": ...}` payload."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters_json_schema,
+            },
+        }
+
+
+class ToolCall(BaseModel):
+    """A tool invocation requested by the LLM.
+
+    `arguments` MUST be a JSON object (dict); malformed JSON from the provider
+    is a domain error, not a silently ignored item (ARCHITECTURE §11, SECURITY §13).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any]
+
+
 class TokenUsage(BaseModel):
     """Token consumption reported by a provider.
 
@@ -52,6 +91,7 @@ class LLMRequest(BaseModel):
 
     messages: list[LLMMessage] = Field(min_length=1)
     system_prompt: str | None = None
+    tools: list[ToolSpec] | None = None  # advertised tools (None → no tools field in payload)
     model: str | None = None  # None → provider default model from configuration
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, ge=1)
@@ -68,7 +108,12 @@ class LLMRequest(BaseModel):
 
 
 class LLMResponse(BaseModel):
-    """Normalized provider response returned to the application layer."""
+    """Normalized provider response returned to the application layer.
+
+    `tool_calls` is not None only when the model requested tool invocations;
+    a response may then carry empty `content` — for the agent loop this is a
+    valid, non-empty outcome (ARCHITECTURE §11, iteration 5.1).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -79,9 +124,15 @@ class LLMResponse(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage)
     request_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    tool_calls: list[ToolCall] | None = None
 
     @field_validator("content")
     @classmethod
     def content_must_be_string(cls, value: str) -> str:
         """Enforce that content is a plain string (may be empty only if provider returned it)."""
         return value
+
+    @property
+    def has_tool_calls(self) -> bool:
+        """True when the model requested at least one tool invocation."""
+        return self.tool_calls is not None and len(self.tool_calls) > 0
