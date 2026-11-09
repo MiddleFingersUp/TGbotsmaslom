@@ -1,9 +1,11 @@
 """Domain-specific repositories implementing tenant isolation rules."""
 
+import datetime
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.context import TenantContext
@@ -11,6 +13,7 @@ from src.db.models.agents import Agent
 from src.db.models.bots import Bot
 from src.db.models.conversations import Conversation
 from src.db.models.customers import Customer
+from src.db.models.enums import ServiceStatus
 from src.db.models.faqs import FAQ
 from src.db.models.handoffs import Handoff
 from src.db.models.leads import Lead
@@ -127,17 +130,90 @@ class MessageRepository(TenantRepository[Message]):
 
 
 class ServiceRepository(TenantRepository[Service]):
-    """Service catalog repository."""
+    """Service catalog repository with Russian full-text search."""
 
     def __init__(self, session: AsyncSession, tenant_context: TenantContext) -> None:
         super().__init__(Service, session, tenant_context)
 
+    async def fulltext_search(
+        self,
+        query: str,
+        tags: list[str],
+        top_k: int,
+        *,
+        today: datetime.date | None = None,
+    ) -> Sequence[Service]:
+        """Rank active services by PostgreSQL full-text search (`russian` config).
+
+        Implementation notes (docs/ARCHITECTURE.md §10, docs/DATABASE.md §4.4):
+        - the search index column from DATABASE.md (`search_tsv`) is not
+          present in the current schema/migration, so the identical
+          expression is computed in-query; when a GENERATED column lands,
+          only this expression needs to change;
+        - tenant isolation is structural: `tenant_id` comes from
+          TenantContext, never from arguments;
+        - only ACTIVE services, not expired (`valid_until >= today` or NULL);
+        - every requested tag must be present (ARRAY containment, AND).
+        """
+        cleaned = query.strip()
+        if not cleaned:
+            return []
+
+        # 'russian'::regconfig as an inline SQL literal (not a bound param):
+        # keeps the identical generated SQL rendered by DATABASE.md §4.4 and
+        # lets query compilation work without a REGCONFIG literal renderer.
+        russian_config = sqlalchemy_text("'russian'::regconfig")
+        search_tsv = func.to_tsvector(
+            russian_config, func.concat(Service.name, " ", Service.description)
+        )
+        tsquery = func.plainto_tsquery(russian_config, cleaned)
+        cutoff_date = today or datetime.date.today()
+
+        statement = (
+            select(Service)
+            .where(
+                Service.tenant_id == self.tenant_id,
+                Service.status == ServiceStatus.ACTIVE,
+                search_tsv.op("@@")(tsquery),
+            )
+            .where(Service.valid_until.is_(None) | (Service.valid_until >= cutoff_date))
+            .order_by(func.ts_rank(search_tsv, tsquery).desc(), Service.name.asc())
+            .limit(max(1, min(int(top_k), 10)))
+        )
+        for tag in tags:
+            statement = statement.where(Service.tags.contains([tag]))
+        rows = await self.session.execute(statement)
+        return rows.scalars().all()
+
 
 class FAQRepository(TenantRepository[FAQ]):
-    """FAQ knowledge repository."""
+    """FAQ knowledge repository with Russian full-text search."""
 
     def __init__(self, session: AsyncSession, tenant_context: TenantContext) -> None:
         super().__init__(FAQ, session, tenant_context)
+
+    async def fulltext_search(self, query: str, top_k: int) -> Sequence[FAQ]:
+        """Rank active FAQ entries by full-text match over question+answer."""
+        cleaned = query.strip()
+        if not cleaned:
+            return []
+
+        russian_config = sqlalchemy_text("'russian'::regconfig")
+        search_tsv = func.to_tsvector(russian_config, func.concat(FAQ.question, " ", FAQ.answer))
+        tsquery = func.plainto_tsquery(russian_config, cleaned)
+
+        statement = (
+            select(FAQ)
+            .where(
+                FAQ.tenant_id == self.tenant_id,
+                FAQ.status == ServiceStatus.ACTIVE,
+                search_tsv.op("@@")(tsquery),
+            )
+            .order_by(func.ts_rank(search_tsv, tsquery).desc(), FAQ.question.asc())
+            .limit(max(1, min(int(top_k), 10)))
+        )
+        rows = await self.session.execute(statement)
+        return rows.scalars().all()
 
 
 class LeadRepository(TenantRepository[Lead]):
