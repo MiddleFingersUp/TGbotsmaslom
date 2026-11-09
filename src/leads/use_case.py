@@ -61,6 +61,7 @@ _CONTEXT_SUMMARY_MAX = 2000
 # `leads` row and the Stage 7.2 staff view, never in notification payloads.
 _PHONE_LIKE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{7,}\d")
 
+
 def _mask_phone_like(text: str) -> str:
     """Replace phone-like sequences with a fixed mask (PII-free texts)."""
     return _PHONE_LIKE_RE.sub("[телефон скрыт]", text)
@@ -148,9 +149,8 @@ def render_lead_notification(note: PendingLeadNotification) -> str:
     """Build the staff-facing notification text (no contact PII)."""
     title = "Обновлена заявка" if note.is_update else "Новая заявка"
     intent = _mask_phone_like(note.intent or "")
-    return (
-        f"{title} (status: {note.status.value}), диалог {str(note.conversation_id)[:8]}"
-        + (f": суть — {intent[:200]}" if intent else "")
+    return f"{title} (status: {note.status.value}), диалог {str(note.conversation_id)[:8]}" + (
+        f": суть — {intent[:200]}" if intent else ""
     )
 
 
@@ -355,9 +355,9 @@ class SaveLeadUseCase:
             return
         summary = conversation.context_summary or ""
         fact = comment[:_LEAD_UPDATE_COMMENT_MAX]
-        conversation.context_summary = f"{summary}\nlead: {fact}".strip()[
-            :_CONTEXT_SUMMARY_MAX
-        ] or None
+        conversation.context_summary = (
+            f"{summary}\nlead: {fact}".strip()[:_CONTEXT_SUMMARY_MAX] or None
+        )
 
     async def resolve_service_id(self, service_name: str | None) -> UUID | None:
         """Exact-name service lookup within the tenant (None → unresolved)."""

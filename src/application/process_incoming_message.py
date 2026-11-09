@@ -23,10 +23,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent_core.state_machine import transition
+from src.config.settings import build_default_bot, get_settings
 from src.db.context import TenantContext
 from src.db.models.conversations import Conversation
 from src.db.models.customers import Customer
 from src.db.models.enums import ConversationState, MessageRole
+from src.db.models.handoffs import Handoff
 from src.db.models.messages import Message
 from src.db.models.tenants import Tenant
 from src.db.repositories.repositories import (
@@ -35,6 +37,7 @@ from src.db.repositories.repositories import (
     CustomerRepository,
     MessageRepository,
 )
+from src.db.session import get_session_factory
 from src.leads.use_case import (
     AfterCommitNotificationQueue,
     LeadTurnScope,
@@ -44,11 +47,20 @@ from src.leads.use_case import (
 from src.monitoring.logging import get_logger
 from src.notification.notifier import Notifier
 from src.telegram_adapter.schemas import IncomingMessage
+from src.tools.handoff_request import (
+    AfterCommitHandoffNotificationQueue,
+    HandoffRequestTool,
+    HandoffTurnScope,
+    handoff_turn_scope,
+    render_handoff_notification,
+)
 from src.tools.registry import ToolRegistry
 from src.tools.save_lead import SaveLeadTool
 from src.tools.search_faq import SearchFAQTool
 from src.tools.search_services import SearchServicesTool
-from src.tools.stubs import HandoffRequestTool
+from src.tools.stubs import SaveLeadTool as _Stage7LeadStub  # offline tests only
+
+_ = _Stage7LeadStub
 
 if TYPE_CHECKING:
     from src.agent_core.agent_loop import AgentLoop
@@ -71,12 +83,12 @@ class ProcessMessageResult:
 
 
 def build_default_registry() -> ToolRegistry:
-    """Production tool registry (docs/DEVELOPMENT_PLAN.md Stage 7.1).
+    """Production tool registry (Stage 7.2).
 
-    REAL tools: search_services / search_faq (Stage 6.2 retrieval) and
-    save_lead (Stage 7.1 lead capture + after-commit notifications).
-    The handoff_request STUB remains until Stage 7.2 (unchanged contract).
-    The Stage-5.1 stub registry stays available for offline unit tests.
+    REAL tools: search_services / search_faq (Stage 6.2 retrieval),
+    save_lead (Stage 7.1) and handoff_request (Stage 7.2 backend
+    interception). The Stage-5.1 stub registry stays available for
+    offline unit tests (unchanged contract).
     """
     registry = ToolRegistry()
     registry.register(SearchServicesTool())
@@ -89,7 +101,6 @@ def build_default_registry() -> ToolRegistry:
 def _build_default_agent_loop() -> AgentLoop:
     """Default loop: provider from platform settings + the production registry."""
     from src.agent_core.agent_loop import AgentLoop
-    from src.config.settings import get_settings
     from src.llm_providers.factory import LLMProviderFactory
 
     provider = LLMProviderFactory.from_settings(get_settings())
@@ -134,9 +145,24 @@ class ProcessIncomingMessageUseCase:
         existing_msg = existing_msg_res.scalars().first()
 
         if existing_msg is not None:
+            # NOTE: явная загрузка диалога — доступ через relationship
+            # (`existing_msg.conversation`) внутри async-сессии вызывает
+            # lazy-load вне greenlet (production-баг, найден в live-проверке
+            # Stage 7.2). Reading the FK directly avoids the IO hop.
+            conversation_email_result = await self.session.execute(
+                select(Conversation).where(
+                    Conversation.tenant_id == message.tenant_id,
+                    Conversation.id == existing_msg.conversation_id,
+                )
+            )
+            found_conversation = conversation_email_result.scalars().first()
             return ProcessMessageResult(
                 tenant_id=message.tenant_id,
-                customer_id=existing_msg.conversation.customer_id,
+                customer_id=(
+                    found_conversation.customer_id
+                    if found_conversation is not None
+                    else UUID(int=0)
+                ),
                 conversation_id=existing_msg.conversation_id,
                 message_id=existing_msg.id,
                 response_text="",
@@ -199,6 +225,7 @@ class ProcessIncomingMessageUseCase:
         response_text: str
         message_meta: dict[str, Any] | None = None
         notification_queue: AfterCommitNotificationQueue | None = None
+        handoff_queue: AfterCommitHandoffNotificationQueue | None = None
 
         if message.is_media:
             # Per FR-1.4: polite refusal asking for text, never reaches the LLM
@@ -233,7 +260,16 @@ class ProcessIncomingMessageUseCase:
                 conversation_id=conversation.id,
                 notifications=notification_queue,
             )
-            with lead_turn_scope(scope):
+            handoff_queue = AfterCommitHandoffNotificationQueue()
+            with (
+                lead_turn_scope(scope),
+                handoff_turn_scope(
+                    HandoffTurnScope(
+                        conversation_id=conversation.id,
+                        notifications=handoff_queue,
+                    )
+                ),
+            ):
                 turn = await self.agent_loop.run(
                     self.session,
                     tenant_context,
@@ -267,9 +303,12 @@ class ProcessIncomingMessageUseCase:
         conversation.last_message_at = now
         await self.session.commit()
 
-        # ─── 6. Lead notifications — AFTER COMMIT (DATABASE.md §7 п. 2) ─
+        # ─── 6. Lead + handoff notifications — AFTER COMMIT ────────────
         notification_statuses = await self._flush_lead_notifications(
             notification_queue, message.tenant_id
+        )
+        handoff_statuses = await self._flush_handoff_notifications(
+            handoff_queue, message.tenant_id
         )
 
         return ProcessMessageResult(
@@ -279,8 +318,63 @@ class ProcessIncomingMessageUseCase:
             message_id=user_message.id,
             response_text=response_text,
             is_duplicate=False,
-            notifications=notification_statuses,
+            notifications=notification_statuses + handoff_statuses,
         )
+
+    async def _flush_handoff_notifications(
+        self,
+        queue: AfterCommitHandoffNotificationQueue | None,
+        tenant_id: UUID,
+    ) -> tuple[str, ...]:
+        """Stage 7.2: delete handoff notifications AFTER COMMIT.
+
+        Delivery → separate transaction sets `handoffs.staff_message_id`
+        (the Telegram id the staff must reply to — PLAN-OD-5 mechanics).
+        Failures are status strings; the dialog never depends on them.
+        """
+        if queue is None:
+            return ()
+        notes = queue.drain()
+        if not notes:
+            return ()
+
+        bot = build_default_bot()
+        statuses: list[str] = []
+        for note in notes:
+            text = render_handoff_notification(note)
+            try:
+                # direct delivery: staff chat id is a COPY on the handoff row
+                if bot is None:
+                    logger.warning("handoff.notification.no_bot_instance")
+                    statuses.append("failed")
+                    continue
+                sent = await bot.send_message(chat_id=note.staff_chat_id, text=text)
+                message_id = sent.message_id
+                statuses.append("sent")
+            except Exception as error:  # noqa: BLE001 - notifications never break dialogs
+                logger.warning(
+                    "handoff.notification.send_failed",
+                    error_type=type(error).__name__,
+                    conversation_id=str(note.conversation_id),
+                )
+                statuses.append("failed")
+                continue
+
+            # Separate transaction to record the notification message id
+            # (PLAN-OD-5: staff replies are replies to THIS message).
+            try:
+                factory = get_session_factory()
+                async with factory() as update_session, update_session.begin():
+                    handoff = await update_session.get(Handoff, note.handoff_id)
+                    if handoff is not None:
+                        handoff.staff_message_id = message_id
+            except Exception as error:  # noqa: BLE001 - bookkeeping is best-effort
+                logger.warning(
+                    "handoff.notification.staff_message_id_unrecorded",
+                    error_type=type(error).__name__,
+                )
+        _ = tenant_id
+        return tuple(statuses)
 
     async def _flush_lead_notifications(
         self,

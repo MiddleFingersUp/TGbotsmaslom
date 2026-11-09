@@ -1,10 +1,17 @@
 """Application configuration management via pydantic-settings."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from aiogram import Bot
+
+from src.monitoring.logging import get_logger
+
+logger = get_logger("config.settings")
 
 
 class Settings(BaseSettings):
@@ -92,6 +99,13 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    # Telegram (single-bot MVP, Stage 7.2)
+    telegram_bot_token: str | None = Field(
+        default=None,
+        alias="TELEGRAM_BOT_TOKEN",
+        description="Bot token for staff relays/deliveries (secret: env only, never logged)",
+    )
+
     # Security
     webhook_secret: str | None = Field(
         default=None,
@@ -109,3 +123,26 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached singleton instance of Settings."""
     return Settings()
+
+
+def build_default_bot() -> "Bot | None":
+    """Build the Caller-Bot from platform settings (Stage 7.2).
+
+    Fail-closed rule: without `TELEGRAM_BOT_TOKEN` there is NO Bot instance —
+    every delivery path checks it and honеstly reports a skip instead of
+    sending with a broken client. The token value is never logged here or
+    anywhere downstream (docs/SECURITY.md §3).
+    """
+    from aiogram import Bot
+
+    token = get_settings().telegram_bot_token
+    if not token or not token.strip():
+        return None
+    try:
+        return Bot(token=token.strip())
+    except Exception as error:  # noqa: BLE001 - invalid-token configs fail closed
+        logger.warning(
+            "config.bot_builder_failed",
+            error_type=type(error).__name__,
+        )
+        return None

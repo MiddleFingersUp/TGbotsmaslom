@@ -73,6 +73,25 @@ def _mock_session() -> AsyncMock:
     return session
 
 
+def _handoff_configured_session(
+    conversation: Any,
+    *,
+    staff_chat_id: int | None = -534_183_2316,
+) -> Any:
+    """Session stub for handoff interception (Stage 7.2 mechanics).
+
+    `session.get(Tenant)` → tenant with the staff chat configured;
+    `session.get(Conversation)` → the REAL conversation object, so the
+    backend flag/state mutations are observable in the test.
+    """
+    session = _mock_session()
+    tenant_mock = MagicMock()
+    tenant_mock.staff_chat_id = staff_chat_id
+    tenant_mock.id = uuid.uuid4()
+    session.get = AsyncMock(side_effect=[tenant_mock, conversation])
+    return session
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_text_reply_single_round() -> None:
@@ -282,7 +301,9 @@ async def test_handoff_intercepted_backend_sets_flag() -> None:
     )
     loop = AgentLoop(provider, build_default_stub_registry())
     conversation = _conversation()
-    result = await loop.run(_mock_session(), _tenant(), _agent(), conversation)
+    result = await loop.run(
+        _handoff_configured_session(conversation), _tenant(), _agent(), conversation
+    )
 
     assert conversation.handoff_active is True
     assert result.handoff_requested is True
@@ -301,8 +322,12 @@ async def test_handoff_interception_precedes_whitelist() -> None:
         ]
     )
     loop = AgentLoop(provider, build_default_stub_registry())
+    conversation = _conversation()
     result = await loop.run(
-        _mock_session(), _tenant(), _agent(allowed_tools=["search_services"]), _conversation()
+        _handoff_configured_session(conversation),
+        _tenant(),
+        _agent(allowed_tools=["search_services"]),
+        conversation,
     )
     assert result.handoff_requested is True
 

@@ -34,6 +34,8 @@ from src.leads.use_case import (
 
 _TENANT_A = uuid.uuid4()
 _TENANT_B = uuid.uuid4()
+
+
 def _mock_result(value: Any = None) -> MagicMock:
     result = MagicMock()
     scalars = MagicMock()
@@ -119,9 +121,7 @@ class TestSaveLeadCreation:
         with pytest.raises(LookupError):
             await use_case.save(_lead_input(), conversation_id=uuid.uuid4())
 
-        assert not any(
-            isinstance(call.args[0], Lead) for call in session.add.call_args_list
-        )
+        assert not any(isinstance(call.args[0], Lead) for call in session.add.call_args_list)
 
 
 @pytest.mark.unit
@@ -158,9 +158,7 @@ class TestLeadDeduplication:
         assert outcome.is_update is True
         assert outcome.lead_id == str(existing.id)
         # no second Lead row was staged
-        assert not any(
-            isinstance(call.args[0], Lead) for call in session.add.call_args_list
-        )
+        assert not any(isinstance(call.args[0], Lead) for call in session.add.call_args_list)
         # snapshot fields refreshed, status untouched
         assert existing.contact_phone == "+7 999 000-00-00"
         assert existing.intent == "Новая суть"

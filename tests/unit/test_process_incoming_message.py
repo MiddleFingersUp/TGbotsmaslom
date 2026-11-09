@@ -211,7 +211,10 @@ async def test_idempotent_deduplication_of_messages() -> None:
     )
     existing_msg.conversation = existing_conv
 
-    mock_session.execute.side_effect = [_mock_result(existing_msg)]
+    mock_session.execute.side_effect = [
+        _mock_result(existing_msg),
+        _mock_result(existing_conv),
+    ]
 
     use_case = ProcessIncomingMessageUseCase(
         mock_session, agent_loop=AgentLoop(MockLLMProvider(), build_default_stub_registry())

@@ -49,6 +49,7 @@ from src.llm_providers.exceptions import (
 )
 from src.llm_providers.schemas import LLMMessage, LLMRequest, LLMResponse, ToolCall
 from src.monitoring.logging import get_logger
+from src.tools.handoff_request import STAFF_UNAVAILABLE, HandoffRequestTool
 from src.tools.registry import MAX_TOOL_CALLS_PER_TURN, ToolRegistry, run_tool
 from src.tools.schemas import ToolError, ToolResult
 
@@ -56,6 +57,11 @@ logger = get_logger("agent_core.agent_loop")
 
 _HANDOFF_TOOL_NAME = "handoff_request"
 _MAX_LLM_ROUNDS = 8
+_TOOL_BUDGET_EXHAUSTED_NOTE = "Лимит действий за ход исчерпан; отвечай клиенту текстом."
+_SYSTEM_ERROR_HANDOFF_NOTE = (
+    "Не удалось обработать сообщение клиента: техническая ошибка модели. "
+    "Сообщите клиенту, что запрос зафиксирован и оператор свяжется с ним."
+)
 _INTERCEPTED_HANDOFF_RESULT = {
     "status": "принято",
     "note": "Сотрудник подключается, ожидайте ответа.",
@@ -165,7 +171,7 @@ class AgentLoop:
                     error_type=type(error).__name__,
                     conversation_id=str(conversation.id),
                 )
-                return self._fallback_result(
+                fallback = self._fallback_result(
                     error,
                     current_state=current_state,
                     ai_model=fallback_model,
@@ -173,6 +179,30 @@ class AgentLoop:
                     tool_meta=tool_meta,
                     handoff_requested=handoff_requested,
                 )
+                # Stage 7.2: SYSTEM_ERROR handoff — the same backend procedure,
+                # called directly (never through the LLM), only when the tenant
+                # is configured for it and no handoff exists yet (docs/§13).
+                if not conversation.handoff_active and not handoff_requested:
+                    await _handoff_on_provider_error(
+                        conversation_id=conversation.id,
+                        tenant_context=tenant_context,
+                        session=session,
+                    )
+                if (
+                    conversation.handoff_active
+                    and conversation.state == (ConversationState.HANDOFF)
+                    and not handoff_requested
+                ):
+                    fallback = AgentTurnResult(
+                        response_text=fallback.response_text,
+                        new_state=ConversationState.HANDOFF,
+                        ai_model=fallback.ai_model,
+                        llm_rounds=fallback.llm_rounds,
+                        tool_meta=fallback.tool_meta,
+                        used_fallback=fallback.used_fallback,
+                        handoff_requested=True,
+                    )
+                return fallback
 
             llm_rounds += 1
             await self._record_usage(session, tenant_context, response, conversation.id)
@@ -204,19 +234,37 @@ class AgentLoop:
                         overflow = True
                         budget_note = _TOOL_BUDGET_EXHAUSTED_NOTE
                     elif call.name == _HANDOFF_TOOL_NAME:
-                        # Intercepted BEFORE the registry (backend effect, §13).
-                        handoff_requested = True
-                        handoff_lock = True
-                        conversation.handoff_active = True
-                        executed_tools.append(call.name)
+                        # Intercepted BEFORE the registry (§13): the REAL backend
+                        # procedure performs row+flag; on failure the agent keeps
+                        # working (the client is never told a human joins).
                         budget -= 1
-                        tool_meta.append({"name": call.name, "status": "ok"})
+                        handoff_note = str((call.arguments or {}).get("note") or "").replace(
+                            "\n", " "
+                        )[:500]
+                        tool = HandoffRequestTool()
+                        handoff_result = await tool.create_handoff(
+                            conversation_id=conversation.id,
+                            tenant_context=tenant_context,
+                            session=session,
+                            note=handoff_note,
+                            trigger="agent_decision",
+                        )
+                        if handoff_result.ok:
+                            handoff_requested = True
+                            handoff_lock = True
+                            executed_tools.append(call.name)
+                            tool_meta.append(self._tool_meta_entry(call.name, handoff_result))
+                            result_text = json.dumps(
+                                (handoff_result.data or {"handoff_id": "", "status": "accepted"}),
+                                ensure_ascii=False,
+                            )
+                        else:
+                            tool_meta.append(self._tool_meta_entry(call.name, handoff_result))
+                            result_text = handoff_result.error_message or STAFF_UNAVAILABLE
                         loop_messages.append(
                             LLMMessage(
                                 role="tool",
-                                content=json.dumps(
-                                    _INTERCEPTED_HANDOFF_RESULT, ensure_ascii=False
-                                ),
+                                content=result_text,
                                 tool_call_id=self._call_id(call),
                             )
                         )
@@ -363,3 +411,31 @@ class AgentLoop:
             )
         except Exception as error:  # noqa: BLE001 - accounting is best-effort
             logger.warning("agent.usage.record_failed", error_type=type(error).__name__)
+
+
+async def _handoff_on_provider_error(
+    *,
+    conversation_id: UUID,
+    tenant_context: TenantContext,
+    session: AsyncSession,
+) -> None:
+    """SYSTEM_ERROR handoff after a provider fallback (Stage 7.2, task 6).
+
+    Direct backend procedure (never through the LLM): internally the tool
+    decides whether the tenant has `staff_chat_id`; skips/failures are
+    silent warnings — the client already received the fallback text.
+    """
+    tool = HandoffRequestTool()
+    result = await tool.create_handoff(
+        conversation_id=conversation_id,
+        tenant_context=tenant_context,
+        session=session,
+        note=_SYSTEM_ERROR_HANDOFF_NOTE,
+        trigger="system_error",
+    )
+    logger.info(
+        "agent.turn.system_error_handoff",
+        accepted=result.ok,
+        error_message=None if result.ok else (result.error_message or "")[:80],
+        conversation_id=str(conversation_id),
+    )

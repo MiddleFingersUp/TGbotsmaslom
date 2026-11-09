@@ -18,7 +18,11 @@ class UserIdentity(BaseModel):
 
 
 class IncomingMessage(BaseModel):
-    """Normalized incoming message from Telegram update."""
+    """Normalized incoming message from Telegram update.
+
+    `is_staff_group=True` marks group updates routed to the staff-handoff
+    use case (chat id < 0); they never enter the client agent path.
+    """
 
     tenant_id: UUID
     bot_id: UUID
@@ -27,6 +31,7 @@ class IncomingMessage(BaseModel):
     text: str | None = None
     is_media: bool = False
     media_type: str | None = None
+    is_staff_group: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     raw_update: dict[str, Any] | None = None
 

@@ -405,8 +405,7 @@ async def run_lead_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]
             .all()
         )
         phone_in_meta = any(
-            bool(m.meta) and phone in json.dumps(m.meta, ensure_ascii=False)
-            for m in all_messages
+            bool(m.meta) and phone in json.dumps(m.meta, ensure_ascii=False) for m in all_messages
         )
         phone_in_meta_str = "FOUND" if phone_in_meta else "not found"
         _prints("-" * 72)
@@ -583,7 +582,7 @@ async def main() -> int:
     os.environ["LLM_DEFAULT_MODEL"] = LLM_MODEL
     os.environ.setdefault("LLM_TIMEOUT", str(int(LLM_TIMEOUT)))
     os.environ["LLM_MAX_RETRIES"] = "1"
-    os.environ["LLM_MAX_TOKENS"] = "512"
+    os.environ["LLM_MAX_TOKENS"] = "2048"  # qwen reasoning consumes most; 512 → EmptyResponse
 
     from src.config.settings import get_settings
 

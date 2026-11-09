@@ -112,8 +112,25 @@ async def handle_telegram_webhook(
         ),
         text=text_content,
         is_media=is_media,
+        is_staff_group=isinstance(chat_id, int) and chat_id < 0,
         raw_update=update_data,
     )
+
+    # ─── 5b. Staff-group updates → handoff relay path (ARCHITECTURE §13) ──
+    # Group messages (chat id < 0, e.g. internal staff chats) NEVER enter
+    # the client agent path.
+    if incoming.is_staff_group:
+        from src.config.settings import build_default_bot
+        from src.handoff.use_case import ProcessStaffReplyUseCase
+
+        staff_use_case = ProcessStaffReplyUseCase(session, bot=build_default_bot())
+        staff_result = await staff_use_case.execute(incoming)
+        return {
+            "ok": True,
+            "is_duplicate": False,
+            "response_text": "",
+            "staff_reply": staff_result.status,
+        }
 
     from src.application.process_incoming_message import ProcessIncomingMessageUseCase
 
