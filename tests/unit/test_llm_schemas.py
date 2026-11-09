@@ -17,7 +17,7 @@ class TestLLMMessage:
         assert message.role == "user"
         assert message.content == "Сколько стоит стрижка?"
 
-    @pytest.mark.parametrize("role", ["admin", "human", "tool", ""])
+    @pytest.mark.parametrize("role", ["admin", "human", ""])
     def test_invalid_role_rejected(self, role: str) -> None:
         with pytest.raises(ValidationError):
             LLMMessage(role=role, content="text")  # type: ignore[arg-type]

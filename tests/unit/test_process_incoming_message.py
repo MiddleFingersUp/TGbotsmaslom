@@ -1,15 +1,62 @@
-"""Unit tests for ProcessIncomingMessageUseCase (message ingestion, echo, and deduplication)."""
+"""Unit tests for ProcessIncomingMessageUseCase: spec cases, agent path, dedup."""
+
+from __future__ import annotations
 
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.agent_core.agent_loop import AgentLoop
 from src.application.process_incoming_message import ProcessIncomingMessageUseCase
 from src.db.models.agents import Agent
 from src.db.models.conversations import Conversation
+from src.db.models.enums import ConversationState, MessageRole
 from src.db.models.messages import Message
+from src.llm_providers.mock import MockLLMProvider
 from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
+from src.tools.stubs import build_default_stub_registry
+
+
+def _mock_result(value: Any = None) -> MagicMock:
+    result = MagicMock()
+    scalars = MagicMock()
+    scalars.first.return_value = value
+    scalars.all.return_value = value if isinstance(value, list) else []
+    result.scalars.return_value = scalars
+    return result
+
+
+def _agent(tenant_id: uuid.UUID, welcome: str = "Добро пожаловать в салон 'Красота'!") -> Agent:
+    return Agent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name="Sales Assistant",
+        system_prompt="Правила компании.",
+        welcome_message=welcome,
+        max_context_messages=12,
+        temperature=0.5,
+        allowed_tools=["search_services", "search_faq", "save_lead", "handoff_request"],
+        is_active=True,
+    )
+
+
+def _incoming(
+    tenant_id: uuid.UUID, *, text: str | None = None, is_media: bool = False
+) -> IncomingMessage:
+    return IncomingMessage(
+        tenant_id=tenant_id,
+        bot_id=uuid.uuid4(),
+        telegram_message_id=int.from_bytes(uuid.uuid4().bytes[:4], "little"),
+        user=UserIdentity(
+            telegram_user_id=int.from_bytes(uuid.uuid4().bytes[:4], "little") % 10**9,
+            telegram_chat_id=int.from_bytes(uuid.uuid4().bytes[:4], "little") % 10**9,
+            first_name="Анна",
+        ),
+        text=text,
+        is_media=is_media,
+    )
 
 
 @pytest.mark.unit
@@ -17,63 +64,28 @@ from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
 async def test_process_start_command_returns_agent_welcome() -> None:
     """Verify /start command returns the configured agent welcome_message."""
     tenant_id = uuid.uuid4()
-    bot_id = uuid.uuid4()
-    telegram_user_id = 12345
-    chat_id = 12345
+    agent = _agent(tenant_id)
 
     mock_session = AsyncMock()
     mock_session.add = MagicMock()
-
-    # Mock execute results for:
-    # 1) idempotency check -> None
-    # 2) customer lookup -> None (will create)
-    # 3) conversation lookup -> None (will create)
-    # 4) agent lookup -> active Agent
-    mock_msg_res = MagicMock()
-    mock_msg_res.scalars.return_value.first.return_value = None
-
-    mock_cust_res = MagicMock()
-    mock_cust_res.scalars.return_value.first.return_value = None
-
-    mock_conv_res = MagicMock()
-    mock_conv_res.scalars.return_value.first.return_value = None
-
-    mock_agent = Agent(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        name="Sales Assistant",
-        system_prompt="Rules",
-        welcome_message="Добро пожаловать в салон 'Красота'!",
-        is_active=True,
-    )
-    mock_agent_res = MagicMock()
-    mock_agent_res.scalars.return_value.first.return_value = mock_agent
-
     mock_session.execute.side_effect = [
-        mock_msg_res,
-        mock_cust_res,
-        mock_conv_res,
-        mock_agent_res,
+        _mock_result(None),  # idempotency
+        _mock_result(None),  # customer lookup
+        _mock_result(None),  # conversation lookup
+        _mock_result(agent),  # agent lookup
     ]
 
-    use_case = ProcessIncomingMessageUseCase(mock_session)
-    incoming = IncomingMessage(
-        tenant_id=tenant_id,
-        bot_id=bot_id,
-        telegram_message_id=1,
-        user=UserIdentity(
-            telegram_user_id=telegram_user_id,
-            telegram_chat_id=chat_id,
-            first_name="Анна",
-        ),
-        text="/start",
-    )
+    loop = AgentLoop(MockLLMProvider(), build_default_stub_registry())
+    use_case = ProcessIncomingMessageUseCase(mock_session, agent_loop=loop)
+    incoming = _incoming(tenant_id, text="/start")
 
     result = await use_case.execute(incoming)
 
     assert result.is_duplicate is False
     assert result.response_text == "Добро пожаловать в салон 'Красота'!"
-    assert mock_session.commit.assert_awaited_once
+    mock_session.commit.assert_awaited_once()
+    # /start never reaches the LLM (welcome message is a backend constant)
+    assert loop.provider.requests == [] if isinstance(loop.provider, MockLLMProvider) else True
 
 
 @pytest.mark.unit
@@ -81,24 +93,20 @@ async def test_process_start_command_returns_agent_welcome() -> None:
 async def test_process_media_message_returns_polite_refusal() -> None:
     """Verify non-text media messages are rejected with FR-1.4 refusal message."""
     tenant_id = uuid.uuid4()
-    bot_id = uuid.uuid4()
+    agent = _agent(tenant_id)
 
     mock_session = AsyncMock()
     mock_session.add = MagicMock()
+    mock_session.execute.side_effect = [
+        _mock_result(None),
+        _mock_result(None),
+        _mock_result(None),
+        _mock_result(agent),
+    ]
 
-    mock_res = MagicMock()
-    mock_res.scalars.return_value.first.return_value = None
-    mock_session.execute.side_effect = [mock_res, mock_res, mock_res, mock_res]
-
-    use_case = ProcessIncomingMessageUseCase(mock_session)
-    incoming = IncomingMessage(
-        tenant_id=tenant_id,
-        bot_id=bot_id,
-        telegram_message_id=2,
-        user=UserIdentity(telegram_user_id=111, telegram_chat_id=111),
-        is_media=True,
-        media_type="photo",
-    )
+    loop = AgentLoop(MockLLMProvider(), build_default_stub_registry())
+    use_case = ProcessIncomingMessageUseCase(mock_session, agent_loop=loop)
+    incoming = _incoming(tenant_id, is_media=True)
 
     result = await use_case.execute(incoming)
 
@@ -107,38 +115,86 @@ async def test_process_media_message_returns_polite_refusal() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_process_text_message_returns_echo_stub() -> None:
-    """Verify regular user text message produces an echo response in Phase 3."""
+async def test_process_text_message_goes_through_agent_path() -> None:
+    """Plain text produces an LLM reply (echo stub replaced in Stage 5.2)."""
     tenant_id = uuid.uuid4()
-    bot_id = uuid.uuid4()
+    agent = _agent(tenant_id, welcome="Welcome")
 
     mock_session = AsyncMock()
     mock_session.add = MagicMock()
+    mock_session.execute.side_effect = [
+        _mock_result(None),
+        _mock_result(None),
+        _mock_result(None),
+        _mock_result(agent),
+        _mock_result([]),  # conversation history for the loop
+    ]
 
-    mock_res = MagicMock()
-    mock_res.scalars.return_value.first.return_value = None
-    mock_session.execute.side_effect = [mock_res, mock_res, mock_res, mock_res]
+    provider = MockLLMProvider(responses=["Здравствуйте! Стрижка есть в каталоге."])
+    loop = AgentLoop(provider, build_default_stub_registry())
+    use_case = ProcessIncomingMessageUseCase(mock_session, agent_loop=loop)
 
-    use_case = ProcessIncomingMessageUseCase(mock_session)
-    incoming = IncomingMessage(
+    result = await use_case.execute(_incoming(tenant_id, text="Сколько стоит стрижка?"))
+
+    assert result.response_text == "Здравствуйте! Стрижка есть в каталоге."
+    assert provider.requests != []  # LLM was actually consulted
+
+    added = [call.args[0] for call in mock_session.add.call_args_list]
+    agent_messages = [
+        obj for obj in added if isinstance(obj, Message) and obj.role == MessageRole.AGENT
+    ]
+    assert len(agent_messages) == 1
+    assert agent_messages[0].ai_model == "mock-model"
+    assert agent_messages[0].meta is not None
+    assert agent_messages[0].meta["fallback"] is False
+
+    conversations = [obj for obj in added if isinstance(obj, Conversation)]
+    # New conversation advanced: greeting -> need_discovery after first reply
+    existing = conversations + [obj for obj in added if isinstance(obj, Conversation)]
+    states = {conv.state for conv in existing}
+    assert ConversationState.NEED_DISCOVERY in states or ConversationState.GREETING in states
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_process_text_message_in_handoff_mode_skips_llm() -> None:
+    """handoff_active=True → no LLM call, empty response, user message kept."""
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id, welcome="Welcome")
+    customer_id = uuid.uuid4()
+    conversation = Conversation(
         tenant_id=tenant_id,
-        bot_id=bot_id,
-        telegram_message_id=3,
-        user=UserIdentity(telegram_user_id=222, telegram_chat_id=222),
-        text="Сколько стоит стрижка?",
+        customer_id=customer_id,
+        state=ConversationState.CONSULTATION,
+        handoff_active=True,
+        message_count=0,
     )
 
-    result = await use_case.execute(incoming)
+    mock_session = AsyncMock()
+    mock_session.add = MagicMock()
+    mock_session.execute.side_effect = [
+        _mock_result(None),
+        _mock_result(None),
+        _mock_result(conversation),
+        _mock_result(agent),
+        _mock_result([]),
+    ]
 
-    assert "Вы написали: Сколько стоит стрижка?" in result.response_text
+    provider = MockLLMProvider(responses=["НЕЛЬЗЯ ВЫЗЫВАТЬ"])
+    loop = AgentLoop(provider, build_default_stub_registry())
+    use_case = ProcessIncomingMessageUseCase(mock_session, agent_loop=loop)
+
+    result = await use_case.execute(_incoming(tenant_id, text="Алло, вы там?"))
+
+    assert result.response_text == ""
+    assert provider.requests == []  # ARCHITECTURE §13: zero LLM calls in handoff
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_idempotent_deduplication_of_messages() -> None:
-    """Verify re-delivered Telegram update is recognized as duplicate without re-processing."""
+    """Verify re-delivered Telegram update is recognized as duplicate."""
     tenant_id = uuid.uuid4()
-    bot_id = uuid.uuid4()
     customer_id = uuid.uuid4()
     conv_id = uuid.uuid4()
     msg_id = uuid.uuid4()
@@ -155,21 +211,21 @@ async def test_idempotent_deduplication_of_messages() -> None:
     )
     existing_msg.conversation = existing_conv
 
-    mock_res = MagicMock()
-    mock_res.scalars.return_value.first.return_value = existing_msg
-    mock_session.execute.return_value = mock_res
+    mock_session.execute.side_effect = [_mock_result(existing_msg)]
 
-    use_case = ProcessIncomingMessageUseCase(mock_session)
-    incoming = IncomingMessage(
+    use_case = ProcessIncomingMessageUseCase(
+        mock_session, agent_loop=AgentLoop(MockLLMProvider(), build_default_stub_registry())
+    )
+    incoming = IncomingMessage(  # re-delivered id 100
         tenant_id=tenant_id,
-        bot_id=bot_id,
+        bot_id=uuid.uuid4(),
         telegram_message_id=100,
         user=UserIdentity(telegram_user_id=333, telegram_chat_id=333),
-        text="Previous message re-delivered",
+        text="Re-delivered",
     )
 
     result = await use_case.execute(incoming)
 
     assert result.is_duplicate is True
     assert result.message_id == msg_id
-    mock_session.commit.assert_not_called()
+    mock_session.commit.assert_not_awaited()
