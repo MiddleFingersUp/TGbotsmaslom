@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=dev
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql+asyncpg://tgbots:tgbots_dev@postgres:5432/tgbots
+      - LLM_API_KEY=
+      - LLM_API_BASE_URL=
+      - LLM_DEFAULT_MODEL=
+      - WEBHOOK_SECRET=dev-webhook-secret
+      - ADMIN_API_TOKEN=dev-admin-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: >
+      uvicorn src.main:create_app --factory
+      --host 0.0.0.0 --port 8000 --reload
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tgbots
+      POSTGRES_PASSWORD: tgbots_dev
+      POSTGRES_DB: tgbots
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tgbots -d tgbots"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

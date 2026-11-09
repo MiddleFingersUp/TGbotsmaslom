@@ -1,0 +1,1 @@
+"""Lead management domain service."""
