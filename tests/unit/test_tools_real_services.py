@@ -24,10 +24,11 @@ from src.application.process_incoming_message import build_default_registry
 from src.db.context import TenantContext
 from src.db.models.services import Service
 from src.tools.registry import ToolRegistry
+from src.tools.save_lead import SaveLeadTool as SaveLeadRealTool
 from src.tools.schemas import ToolResult
 from src.tools.search_faq import SearchFAQTool
 from src.tools.search_services import SearchServicesTool as _RealServicesTool
-from src.tools.stubs import HandoffRequestTool, SaveLeadTool
+from src.tools.stubs import HandoffRequestTool
 
 
 def _real_search_services_tool() -> Any:
@@ -225,7 +226,7 @@ class TestRealSearchFAQTool:
 
 @pytest.mark.unit
 class TestProductionRegistry:
-    """Production registry: real search tools + Stage-7 stubs."""
+    """Production registry: real search tools + real save_lead + handoff stub."""
 
     def test_real_tools_replaced_the_search_stubs(self) -> None:
         from src.tools.search_faq import SearchFAQTool as FAQRealTool
@@ -235,7 +236,7 @@ class TestProductionRegistry:
 
         assert isinstance(registry.get("search_services", ["search_services"]), ServicesRealTool)
         assert isinstance(registry.get("search_faq", ["search_faq"]), FAQRealTool)
-        assert isinstance(registry.get("save_lead", ["save_lead"]), SaveLeadTool)
+        assert isinstance(registry.get("save_lead", ["save_lead"]), SaveLeadRealTool)
         assert isinstance(registry.get("handoff_request", ["handoff_request"]), HandoffRequestTool)
         assert sorted(registry.names()) == [
             "handoff_request",

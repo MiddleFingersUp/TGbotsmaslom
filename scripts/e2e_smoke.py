@@ -11,7 +11,8 @@ Manual run (NOT part of pytest; docs/DEVELOPMENT_PLAN.md Stage 5, iteration 5.3)
 5. .venv\\Scripts\\python.exe scripts\\e2e_smoke.py
 
 Honest scope (fixed by Stage 5.1):
-- the agent tools are Stage 5.1 STUBS (search_services/search_faq/save_lead/
+- the agent tools are the PRODUCTION registry (real retrieval tools Stage
+  6.2 + real save_lead Stage 7.1; handoff stays a stub until 7.2)
   handoff_request): they do NOT read tenant's services from PostgreSQL.
   Demo services are seeded for later stages only.
 - no Telegram adapter, no notifications (Stage 7), no real handoff row.
@@ -172,7 +173,7 @@ async def seed_fixture(agent_model: str | None) -> tuple[UUID, UUID]:
             model=agent_model,
             temperature=0.5,
             max_context_messages=12,
-            allowed_tools=["search_services"],
+            allowed_tools=["search_services", "search_faq", "save_lead"],
             welcome_message="Здравствуйте! Чем могу помочь?",
             is_active=True,
         )
@@ -319,6 +320,121 @@ async def run_two_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]
                 }
             )
     return report
+
+
+async def run_lead_turns(tenant_id: UUID, agent_id: UUID) -> list[dict[str, Any]]:
+    """Stage 7.1 lead scenario: real save_lead + dedup + after-commit notification.
+
+    SAME customer -> SAME conversation across two turns:
+    1. '...оставьте заявку, мой номер +7 999 000-00-00'  → save_lead creates;
+    2. repeated/updated lead request                       → updates, NOT a
+       second row (DEVELOPMENT_PLAN Stage 7 criterion).
+
+    Post-run checks against the live DB: exactly ONE lead row for the
+    tenant, status 'new', phone number absent from agent messages' meta
+    (PII minimization), notification outcome reported by the use case
+    (expected: skipped while tenants.staff_chat_id is unset).
+    """
+    from src.agent_core.agent_loop import AgentLoop
+    from src.application.process_incoming_message import (
+        ProcessIncomingMessageUseCase,
+        build_default_registry,
+    )
+    from src.config.settings import get_settings
+    from src.db.models.agents import Agent as AgentModel
+    from src.db.models.leads import Lead
+    from src.db.models.messages import Message
+    from src.db.models.tenants import Tenant
+    from src.db.session import get_session_factory
+    from src.llm_providers.factory import LLMProviderFactory
+    from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
+
+    get_settings()
+    provider = LLMProviderFactory.from_settings(get_settings())
+    loop = AgentLoop(provider, build_default_registry())
+
+    phone = "+7 999 000-00-00"
+    user_id = 7700_000_999  # SAME client for both lead turns
+    inputs = [
+        ("lead-create", f"Хочу стрижку, оставьте заявку, мой номер {phone}"),
+        ("lead-update", "Лучше мужскую стрижку, номер тот же"),
+    ]
+    report: list[dict[str, Any]] = []
+
+    factory = get_session_factory()
+    for label, text in inputs:
+        async with factory() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            agent = await session.get(AgentModel, agent_id)
+            assert tenant is not None and agent is not None
+
+            incoming = IncomingMessage(
+                tenant_id=tenant_id,
+                bot_id=_fixed_uuid("fake-bot"),
+                telegram_message_id=9100 + inputs.index((label, text)),
+                user=UserIdentity(
+                    telegram_user_id=user_id,
+                    telegram_chat_id=user_id,
+                    first_name="E2E",
+                ),
+                text=text,
+            )
+            use_case = ProcessIncomingMessageUseCase(session, agent_loop=loop)
+            result = await use_case.execute(incoming)
+
+            report.append(
+                {
+                    "turn": label,
+                    "input": text,
+                    "response": result.response_text[:300],
+                    "conversation_id": str(result.conversation_id),
+                    "notifications": list(result.notifications),
+                }
+            )
+
+    # Post-run verification in a FRESH session (post-commit state).
+    async with factory() as session:
+        leads = (
+            (await session.execute(select(Lead).where(Lead.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+        all_messages = (
+            (await session.execute(select(Message).where(Message.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+        phone_in_meta = any(
+            bool(m.meta) and phone in json.dumps(m.meta, ensure_ascii=False)
+            for m in all_messages
+        )
+        phone_in_meta_str = "FOUND" if phone_in_meta else "not found"
+        _prints("-" * 72)
+        _prints(f"LEAD ROWS for fixture tenant: {len(leads)}")
+        for lead in leads:
+            _prints(
+                f"  lead id={str(lead.id)[:8]}… status={lead.status.value} "
+                f"conversation={str(lead.conversation_id)[:8]}…"
+            )
+        _prints(f"PII CHECK: phone in messages.meta -> {phone_in_meta_str}")
+        for turn in report:
+            _prints(
+                f"TURN ({turn['turn']}) input: {turn['input']}\n"
+                f"  ANSWER: {turn['response']}\n"
+                f"  NOTIFICATIONS: {turn['notifications']}"
+            )
+
+    checks_ok = True
+    if len(leads) != 1:
+        _prints(f"  CHECK FAILED: expected exactly 1 lead (updated), got {len(leads)}")
+        checks_ok = False
+    for lead in leads:
+        if lead.status.value != "new":
+            _prints(f"  CHECK FAILED: lead status {lead.status.value} != new")
+            checks_ok = False
+    if phone_in_meta:
+        checks_ok = False
+    return [dict(item, checks_ok=checks_ok) for item in report]
 
 
 async def run_llm_only_mode() -> bool:
@@ -517,11 +633,24 @@ async def main() -> int:
                 f"  TOKEN_USAGE: rows(this tenant)={turn['usage_rows_tenant_total']} "
                 f"total_tokens={turn['usage_total_admin']}"
             )
+            if turn.get("checks_ok") is False:
+                return 4
+
+        # Stage 7.1 lead scenario: run once (default fixture) — the lead
+        # logic is model-independent, so the override fixture repeats only
+        # the model-override checks above.
+        if key == "e2e-default":
+            _prints("-" * 72)
+            _prints("STAGE 7.1 LEAD SCENARIO (fixture e2e-default)")
+            lead_turns = await run_lead_turns(tenant_id, agent_id)
+            if any(t.get("checks_ok") is False for t in lead_turns):
+                return 5
 
     _prints("=" * 72)
     _prints("E2E SMOKE SUCCESS.")
-    _prints("Границы честности: инструменты — заглушки Stage 5.1 (БД-каталог читают")
-    _prints("только этапы 6-7); Telegram/handoff-уведомления вне scope.")
+    _prints("Границы честности: retrieval — реальный PostgreSQL-каталог (Stage 6.2);")
+    _prints("leads — реальные записи + after-commit очередь (Stage 7.1);")
+    _prints("фактическая Telegram-отправка и handoff-механика — Stage 7.2.")
     return 0
 
 

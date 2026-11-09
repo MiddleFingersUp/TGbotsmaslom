@@ -72,6 +72,7 @@ secret_source        : env, cipher, vault
 | default_language | text | NOT NULL, DEFAULT 'ru' | Язык общения агента (MVP — только 'ru') |
 | timezone | text | NOT NULL, DEFAULT 'Europe/Moscow' | Для отображения времени; datetime хранится в UTC |
 | booking_enabled | boolean | NOT NULL, DEFAULT false | Флаг включения модуля записи (bookings) |
+| staff_chat_id | bigint | NULL | Внутренний Telegram-чат/группа сотрудников тенанта — адрес lead-уведомлений (решение 7.1: Notifier шлёт сюда; NULL = конфигурация не задана, уведомление SKIPPED + warn-лог, ход агента не ломается). Миграция `002_tenants_staff_chat`. При создании handoff значение копируется в `handoffs.staff_chat_id` (§4.11). |
 | retention_days | integer | NULL | Глубина хранения сообщений после закрытия диалога; NULL = глобальный дефолт (см. §10, Open Decision) |
 | notes | text | NULL | Служебные заметки оператора (без персональных данных) |
 | created_at / updated_at | timestamptz | NOT NULL | — |
@@ -324,7 +325,7 @@ search_tsv tsvector GENERATED ALWAYS AS
 | conversation_id | uuid, FK → conversations.id | NOT NULL | Диалог |
 | trigger | handoff_trigger | NOT NULL | Инициатор: клиент / агент / системная ошибка |
 | status | handoff_status | NOT NULL, DEFAULT 'active' | Активный / сотрудник вернулся в AI / диалог закрыт |
-| staff_chat_id | bigint | NOT NULL | Внутренний Telegram-чат или группа сотрудников (решение зафиксировано: handoff идёт через внутренний чат/группу) |
+| staff_chat_id | bigint | NOT NULL | Внутренний Telegram-чат или группа сотрудников (решение зафиксировано: handoff идёт через внутренний чат/группу). При создании handoff значение КОПИРУЕТСЯ из `tenants.staff_chat_id`; если у тенанта чат не задан — уведомление не отправляется (warn-лог), создание строки handoff этим не блокируется (детали — Этап 7.2). |
 | staff_message_id | bigint | NULL | ID уведомления в чате сотрудников (для reply-механики ответов сотрудников) |
 | note | text | NULL | Краткий контекст для сотрудников |
 | initiated_at | timestamptz | NOT NULL, DEFAULT now() | — |
@@ -413,6 +414,8 @@ erDiagram
 
 1. **Приём сообщения (webhook-идемпотентно):** `upsert customers` (по `tenant_id + telegram_user_id`) → `get/create conversations` → `insert messages` (с `telegram_message_id`). Дедуп — через уникальный индекс; при конфликте — операция считается выполненной (NFR-8).
 2. **Сохранение лида (`save_lead`, инструмент):** `insert/upsert leads` (в рамках частичного unique по открытому лиду) + `update conversations.state/context_summary`. После COMMIT — уведомление сотрудникам (т.к. отправка в Telegram не транзакционна; сбой доставки фиксируется и ретраится, сам лид уже сохранён).
+   - **(Текущее решение, 7.1)** адрес lead-уведомлений — `tenants.staff_chat_id` (миграция 002, nullable); если не задан — Notifier фиксирует SKIPPED + warn-лог, транзакция и ход агента не ломаются. При handoff значение копируется в `handoffs.staff_chat_id` (§4.11, 7.2).
+   - **(Текущее решение, 7.1)** механизм «после COMMIT»: уведомление ставится в per-turn очередь (`AfterCommitNotificationQueue`), которую выгружает вызывающий use case сразу после `session.commit()` хода; механика выбрана детерминированной (SQLAlchemy after_commit-событие на async-сессии даёт только sync-callback), доставка — через `Notifier` (fail-closed).
 3. **handoff_request:** `insert handoffs (status='active')` + `update conversations.handoff_active/state` в одной транзакции; затем уведомление в чат сотрудников.
 4. **Возврат из handoff:** `update handoffs.status='returned'` + `update conversations` — одна транзакция.
 5. **booking_request (когда модуль вкл.):** `insert bookings status='requested'` + связанный `save_lead`, если лида ещё нет — одна транзакция.

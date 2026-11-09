@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, Enum, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Enum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -43,6 +43,14 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     timezone: Mapped[str] = mapped_column(String(50), default="Europe/Moscow", nullable=False)
     booking_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Stage 7.1 decision (docs/DATABASE.md §4.1, migration 002): internal
+    # Telegram chat/group id for staff notifications (leads now, handoffs
+    # in 7.2 — the value is copied into handoffs.staff_chat_id). NULL is a
+    # valid state: Notifier skips delivery with a warn log and the agent
+    # turn must never break because of a missing configuration.
+    staff_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships

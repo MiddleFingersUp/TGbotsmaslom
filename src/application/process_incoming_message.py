@@ -28,18 +28,27 @@ from src.db.models.conversations import Conversation
 from src.db.models.customers import Customer
 from src.db.models.enums import ConversationState, MessageRole
 from src.db.models.messages import Message
+from src.db.models.tenants import Tenant
 from src.db.repositories.repositories import (
     AgentRepository,
     ConversationRepository,
     CustomerRepository,
     MessageRepository,
 )
+from src.leads.use_case import (
+    AfterCommitNotificationQueue,
+    LeadTurnScope,
+    lead_turn_scope,
+    render_lead_notification,
+)
 from src.monitoring.logging import get_logger
+from src.notification.notifier import Notifier
 from src.telegram_adapter.schemas import IncomingMessage
 from src.tools.registry import ToolRegistry
+from src.tools.save_lead import SaveLeadTool
 from src.tools.search_faq import SearchFAQTool
 from src.tools.search_services import SearchServicesTool
-from src.tools.stubs import HandoffRequestTool, SaveLeadTool
+from src.tools.stubs import HandoffRequestTool
 
 if TYPE_CHECKING:
     from src.agent_core.agent_loop import AgentLoop
@@ -57,14 +66,16 @@ class ProcessMessageResult:
     message_id: UUID
     response_text: str
     is_duplicate: bool = False
+    # Post-commit lead notification outcomes ("sent"/"skipped"/"failed").
+    notifications: tuple[str, ...] = ()
 
 
 def build_default_registry() -> ToolRegistry:
-    """Production tool registry (docs/DEVELOPMENT_PLAN.md Stage 6.2).
+    """Production tool registry (docs/DEVELOPMENT_PLAN.md Stage 7.1).
 
-    REAL tools (Stage 6.2): search_services / search_faq — PostgreSQL
-    retrieval via PostgresRetrievalService.
-    Stage-7 stubs remain until leads & handoff land (unchanged contract).
+    REAL tools: search_services / search_faq (Stage 6.2 retrieval) and
+    save_lead (Stage 7.1 lead capture + after-commit notifications).
+    The handoff_request STUB remains until Stage 7.2 (unchanged contract).
     The Stage-5.1 stub registry stays available for offline unit tests.
     """
     registry = ToolRegistry()
@@ -88,10 +99,21 @@ def _build_default_agent_loop() -> AgentLoop:
 class ProcessIncomingMessageUseCase:
     """Orchestrates message ingestion, customer upsert, conversation, agent turn."""
 
-    def __init__(self, session: AsyncSession, agent_loop: AgentLoop | None = None) -> None:
-        """`agent_loop=None` builds the default loop from platform settings."""
+    def __init__(
+        self,
+        session: AsyncSession,
+        agent_loop: AgentLoop | None = None,
+        notifier: Notifier | None = None,
+    ) -> None:
+        """`agent_loop=None` builds the default loop from platform settings.
+
+        `notifier` is injectable for unit tests (a stub sender); the real
+        Notifier delivers to `tenants.staff_chat_id` AFTER the commit of
+        the whole turn, never inside the transaction.
+        """
         self.session = session
         self.agent_loop = agent_loop if agent_loop is not None else _build_default_agent_loop()
+        self.notifier = notifier if notifier is not None else Notifier()
 
     async def execute(self, message: IncomingMessage) -> ProcessMessageResult:
         """Process incoming message atomically in a database transaction."""
@@ -176,6 +198,7 @@ class ProcessIncomingMessageUseCase:
         # ─── 5. Produce the Agent Reply ───────────────────────────────
         response_text: str
         message_meta: dict[str, Any] | None = None
+        notification_queue: AfterCommitNotificationQueue | None = None
 
         if message.is_media:
             # Per FR-1.4: polite refusal asking for text, never reaches the LLM
@@ -202,12 +225,21 @@ class ProcessIncomingMessageUseCase:
             # the user text stays as a user message awaiting a human reply.
             response_text = ""
         else:
-            turn = await self.agent_loop.run(
-                self.session,
-                tenant_context,
-                active_agent,
-                conversation,
+            # Stage 7.1: the dialog-turn scope carries the backend-owned
+            # conversation id and the after-commit notification queue to
+            # the real `save_lead` tool (registry protocol unchanged).
+            notification_queue = AfterCommitNotificationQueue()
+            scope = LeadTurnScope(
+                conversation_id=conversation.id,
+                notifications=notification_queue,
             )
+            with lead_turn_scope(scope):
+                turn = await self.agent_loop.run(
+                    self.session,
+                    tenant_context,
+                    active_agent,
+                    conversation,
+                )
             response_text = turn.response_text
             message_meta = turn.meta()
             message_meta["ai_model"] = turn.ai_model
@@ -235,6 +267,11 @@ class ProcessIncomingMessageUseCase:
         conversation.last_message_at = now
         await self.session.commit()
 
+        # ─── 6. Lead notifications — AFTER COMMIT (DATABASE.md §7 п. 2) ─
+        notification_statuses = await self._flush_lead_notifications(
+            notification_queue, message.tenant_id
+        )
+
         return ProcessMessageResult(
             tenant_id=message.tenant_id,
             customer_id=customer.id,
@@ -242,4 +279,44 @@ class ProcessIncomingMessageUseCase:
             message_id=user_message.id,
             response_text=response_text,
             is_duplicate=False,
+            notifications=notification_statuses,
         )
+
+    async def _flush_lead_notifications(
+        self,
+        queue: AfterCommitNotificationQueue | None,
+        tenant_id: UUID,
+    ) -> tuple[str, ...]:
+        """Flush the queued lead notifications after the turn's COMMIT.
+
+        Fail-closed: delivery problems are reduced to status strings; the
+        dialog result never depends on the notification outcome. With no
+        Bot instance wired (Stage 7.2 will pass the real one through the
+        Telegram adapter) the Notifier reports honestly per-item.
+        """
+        if queue is None:
+            return ()
+        notes = queue.drain()
+        if not notes:
+            return ()
+
+        tenant = await self.session.get(Tenant, tenant_id)
+        if tenant is None:
+            logger.warning("lead.notification.tenant_missing", tenant_id=str(tenant_id))
+            return tuple("failed" for _ in notes)
+
+        statuses: list[str] = []
+        for note in notes:
+            text = render_lead_notification(note)
+            try:
+                outcome = await self.notifier.send(text, tenant)
+            except Exception as error:  # noqa: BLE001 - notifications never break dialogs
+                logger.warning(
+                    "lead.notification.send_failed",
+                    error_type=type(error).__name__,
+                    conversation_id=str(note.conversation_id),
+                )
+                statuses.append("failed")
+                continue
+            statuses.append(outcome.status)
+        return tuple(statuses)
