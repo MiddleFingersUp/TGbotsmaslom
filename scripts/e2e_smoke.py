@@ -311,10 +311,11 @@ async def run_llm_only_mode() -> bool:
                 f"{response.text[:400].encode('ascii', 'replace').decode()}"
             )
 
-    provider._client = httpx.AsyncClient(  # noqa: SLF001 - e2e diagnostic hook
+    provider.diagnostic_client = httpx.AsyncClient(  # type: ignore[attr-defined] - e2e hook
         event_hooks={"response": [_log_error_response]}
     )
-    provider._owns_client = True  # noqa: SLF001
+    provider._client = provider.diagnostic_client  # type: ignore[attr-defined]  # noqa: SLF001
+    provider._owns_client = True  # type: ignore[attr-defined]  # noqa: SLF001
 
     loop = AgentLoop(provider, build_default_stub_registry())
 
