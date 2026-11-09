@@ -47,6 +47,9 @@ select = [
     "A",   # flake8-builtins
     "SIM", # flake8-simplify
 ]
+ignore = [
+    "B008", # do not perform function calls in argument defaults (FastAPI Depends)
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
