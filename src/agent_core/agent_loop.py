@@ -295,7 +295,7 @@ class AgentLoop:
                 continue
 
             # ─── Final text path ────────────────────────────────────────
-            issues = validate_response(response.content)
+            issues = validate_response(response.content, executed_tools)
             if not issues:
                 return AgentTurnResult(
                     response_text=response.content,
@@ -322,8 +322,11 @@ class AgentLoop:
                         role="user",
                         content=(
                             "Техническая проверка: предыдущий ответ непригоден "
-                            "(пустой, слишком длинный или со служебными артефактами). "
-                            "Дай клиенту нормальный короткий вежливый ответ."
+                            "(пустой, слишком длинный, со служебными артефактами или "
+                            "неподтверждёнными заявлениями). Дай клиенту нормальный "
+                            "короткий вежливый ответ. Не утверждай, что заявка "
+                            "сохранена или клиент передан сотруднику, если фактического "
+                            "действия не было."
                         ),
                     )
                 )

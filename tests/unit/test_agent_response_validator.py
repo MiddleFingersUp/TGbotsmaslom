@@ -115,3 +115,53 @@ def build_registry() -> Any:
     registry = ToolRegistry()
     registry.register(SearchServicesTool())
     return registry
+
+
+# ─── Stage 7 acceptance fix: no unbacked business-action claims ──────────
+
+
+def test_save_claim_without_save_lead_tool_is_invalid() -> None:
+    """'Ваша заявка сохранена!' without save_lead executed → flagged."""
+    from src.agent_core.response_validator import validate_response
+
+    text = "Ваша заявка сохранена! Сотрудник свяжется с вами."
+    assert "unbacked_save_claim" in validate_response(text, [])
+
+
+def test_past_and_future_save_claims_flagged() -> None:
+    from src.agent_core.response_validator import validate_response
+
+    assert "unbacked_save_claim" in validate_response("Я сохраню вашу заявку.", [])
+    assert "unbacked_save_claim" in validate_response("Заявка оформлена, ждите звонка.", [])
+
+
+def test_save_claim_with_save_lead_tool_is_valid() -> None:
+    from src.agent_core.response_validator import validate_response
+
+    text = "Ваша заявка сохранена! Сотрудник свяжется с вами."
+    assert validate_response(text, ["save_lead"]) == []
+
+
+def test_handoff_claim_without_handoff_tool_is_invalid() -> None:
+    from src.agent_core.response_validator import validate_response
+
+    assert "unbacked_handoff_claim" in validate_response(
+        "Передаю вас сотруднику, он подключится.", []
+    )
+    assert "unbacked_handoff_claim" in validate_response(
+        "Сотрудник скоро подключится к переписке.", []
+    )
+
+
+def test_handoff_claim_with_handoff_tool_is_valid() -> None:
+    from src.agent_core.response_validator import validate_response
+
+    assert validate_response("Передаю вас сотруднику.", ["handoff_request"]) == []
+
+
+def test_plain_polite_text_no_tools_is_valid() -> None:
+    from src.agent_core.response_validator import validate_response
+
+    assert validate_response(
+        "Здравствуйте! Подскажите, какие услуги вас интересуют?", []
+    ) == []
