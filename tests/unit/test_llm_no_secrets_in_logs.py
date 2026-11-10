@@ -18,6 +18,8 @@ from src.llm_providers.openai_like import OpenAICompatibleProvider
 from src.llm_providers.schemas import LLMMessage, LLMRequest
 from src.monitoring.logging import setup_logging
 
+pytestmark = [pytest.mark.security, pytest.mark.unit]
+
 _API_KEY = "sk-very-secret-test-key-do-not-log-777"
 _BASE_URL = "http://llm.test/v1"
 

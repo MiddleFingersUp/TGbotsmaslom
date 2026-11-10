@@ -20,6 +20,8 @@ from src.db.models.conversations import Conversation
 from src.db.models.enums import ConversationState
 from src.llm_providers.mock import MockLLMProvider
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 def _tenant() -> TenantContext:
     return TenantContext(tenant_id=uuid.uuid4())
@@ -162,6 +164,4 @@ def test_handoff_claim_with_handoff_tool_is_valid() -> None:
 def test_plain_polite_text_no_tools_is_valid() -> None:
     from src.agent_core.response_validator import validate_response
 
-    assert validate_response(
-        "Здравствуйте! Подскажите, какие услуги вас интересуют?", []
-    ) == []
+    assert validate_response("Здравствуйте! Подскажите, какие услуги вас интересуют?", []) == []

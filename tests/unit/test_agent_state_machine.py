@@ -7,6 +7,8 @@ import pytest
 from src.agent_core.state_machine import initial_state, transition
 from src.db.models.enums import ConversationState
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 @pytest.mark.unit
 class TestStateMachine:

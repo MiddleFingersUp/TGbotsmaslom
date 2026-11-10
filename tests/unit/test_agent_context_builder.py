@@ -13,6 +13,8 @@ from src.db.models.agents import Agent
 from src.db.models.enums import MessageRole
 from src.db.models.messages import Message
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 def _agent(max_context_messages: int = 4) -> Agent:
     return Agent(

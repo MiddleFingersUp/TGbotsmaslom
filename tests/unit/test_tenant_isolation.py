@@ -10,6 +10,8 @@ from src.db.models.customers import Customer
 from src.db.models.services import Service
 from src.db.repositories.base import TenantRepository
 
+pytestmark = [pytest.mark.security, pytest.mark.unit]
+
 
 @pytest.mark.unit
 def test_tenant_context_requires_valid_uuid() -> None:

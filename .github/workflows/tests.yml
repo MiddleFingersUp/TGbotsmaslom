@@ -1,0 +1,56 @@
+# TGbots CI: lint + type-check + full offline test suite.
+#
+# Honest scope (Stage 8.1):
+# - all 265 tests in the repository are OFFLINE (mocked sessions, MockLLM / fake
+#   transport); no test requires PostgreSQL, llama-server or Telegram, so this
+#   job runs WITHOUT service containers;
+# - live E2E checks (scripts/e2e_smoke.py, scripts/live_handoff_check.py) are
+#   MANUAL runs against real infrastructure — they are deliberately NOT part
+#   of CI and must never access real LLM/Telegram endpoints from CI;
+# - the `integration` pytest marker is reserved for future live-DB tests; if
+#   such tests appear, add a `postgres:16` service here and run
+#   `pytest -m "integration or unit"` instead of the plain suite.
+#
+# Secrets: none are required. The workflow never reads .env and never runs
+# scripts that touch real Telegram/LLM endpoints.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  hardening:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project (runtime) + dev extras
+        run: pip install -e ".[dev]"
+
+      - name: Ruff (lint + format check)
+        run: |
+          ruff check src scripts tests
+          ruff format --check src scripts tests
+
+      - name: Mypy (strict, source only)
+        run: mypy src
+
+      - name: Pytest (full offline suite)
+        run: pytest -q
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Offline suite: lint + mypy + pytest"
+          echo "Category breakdown locally: scripts/run_all_tests.ps1"

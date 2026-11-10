@@ -16,6 +16,8 @@ from src.tools.stubs import (
     build_default_stub_registry,
 )
 
+pytestmark = [pytest.mark.unit]
+
 _ALLOWED_ALL = ["search_services", "search_faq", "save_lead", "handoff_request"]
 
 

@@ -25,6 +25,8 @@ from src.llm_providers.schemas import ToolCall
 from src.tools.registry import MAX_TOOL_CALLS_PER_TURN
 from src.tools.stubs import SearchServicesTool, build_default_stub_registry
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 _ALLOWED = ["search_services", "search_faq", "save_lead", "handoff_request"]
 
 

@@ -35,6 +35,7 @@ async def test_webhook_returns_404_for_unknown_bot(client: AsyncClient, app: Any
 
 
 @pytest.mark.unit
+@pytest.mark.security
 async def test_webhook_rejects_invalid_secret_token(client: AsyncClient, app: Any) -> None:
     """Verify webhook with incorrect X-Telegram-Bot-Api-Secret-Token returns 403 Forbidden."""
     bot_id = uuid.uuid4()
@@ -69,6 +70,7 @@ async def test_webhook_rejects_invalid_secret_token(client: AsyncClient, app: An
 
 
 @pytest.mark.unit
+@pytest.mark.security
 async def test_webhook_enforces_rate_limiting(client: AsyncClient, app: Any) -> None:
     """Verify exceeding rate limit triggers 429 Too Many Requests."""
     bot_id = uuid.uuid4()

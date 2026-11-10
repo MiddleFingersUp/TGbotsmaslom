@@ -25,6 +25,8 @@ from src.llm_providers.schemas import TokenUsage, ToolCall
 from src.tools.registry import ToolRegistry
 from src.tools.stubs import SearchServicesTool
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 def make_registry() -> ToolRegistry:
     """Registry with the single search stub used by golden scenarios."""

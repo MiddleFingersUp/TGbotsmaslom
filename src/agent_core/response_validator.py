@@ -46,9 +46,7 @@ _UNBACKED_HANDOFF_PATTERNS: tuple[re.Pattern[str], ...] = (
 _BACKED_BY_HANDOFF = "handoff_request"
 
 
-def validate_response(
-    text: str | None, executed_tools: list[str] | None = None
-) -> list[str]:
+def validate_response(text: str | None, executed_tools: list[str] | None = None) -> list[str]:
     """Return a list of validation issue codes; empty list means acceptable.
 
     `executed_tools` — backend tool names that actually ran in THIS turn;

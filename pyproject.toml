@@ -76,7 +76,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "unit: Unit tests",
-    "integration: Integration tests (require DB)",
+    "integration: Integration tests (require live DB)",
     "agent: Agent behavior tests",
     "security: Security and tenant isolation tests",
+    "database: Database tests (schema/constraints)",
 ]

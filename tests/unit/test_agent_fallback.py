@@ -25,6 +25,8 @@ from src.llm_providers.exceptions import (
     LLMTimeoutError,
 )
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 @pytest.mark.unit
 class TestValidateResponse:

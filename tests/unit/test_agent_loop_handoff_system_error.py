@@ -20,6 +20,8 @@ from src.llm_providers.mock import MockLLMProvider
 from src.tools.stubs import build_default_stub_registry
 from tests.unit.test_agent_loop import _agent, _conversation, _tenant
 
+pytestmark = [pytest.mark.agent, pytest.mark.unit]
+
 
 def _session_for_handoff(
     *,

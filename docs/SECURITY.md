@@ -258,6 +258,27 @@
 
 Плюс: проверка pip-зависимостей на известные уязвимости — Should Have на Этапе 8. Минимальный ручной security-обзор перед пилотом — обязателен.
 
+### 18.1. Реализованные механики (факт кода, Stage 8.1)
+
+Ниже перечислены защиты, которые уже РЕАЛИЗОВАНЫ и покрыты тестами (маркер `security`):
+
+| Механика | Где живёт / как проверяется |
+|---|---|
+| Tenant-изоляция уровня приложения | `TenantRepository` требует `TenantContext`; проверка bound-params в генерируемом SQL (tenant A не читает данные B) — `tests/unit/test_tenant_isolation.py`, `test_knowledge_retrieval.py::test_tenant_isolation_via_context_only` |
+| Whitelist инструментов | `ToolRegistry.get` — единый отказ `unknown tool` для незарегистрированных/не-whitelisted (анти-перечисление); Pydantic-валидация входов/выходов, fail-closed — `tests/unit/test_tool_registry.py` |
+| No-unbacked-claims (запрет выдуманных фактов/секретов в ответе) | `response_validator` — credential-шаблоны (`sk-…`, `Bearer …`) и tool-артефакты блокируются; регенерация без tools; honest-empty retrieval (`results=[]` + «по каталогу ничего не найдено») — `tests/unit/test_agent_response_validator.py`, `test_knowledge_retrieval.py` |
+| Handoff fail-closed | без `staff_chat_id` → `ok=False` без флага (агент не обещает «оператор подключится»); is_bot/non-reply игнор; идемпотентный staff-reply — `tests/unit/test_tool_handoff_request.py`, `test_staff_reply_use_case.py` |
+| After-commit notify (без транзакции) | Lead/handoff уведомления доставляются после COMMIT; сбой доставки не ломает ход; staff_message_id — отдельной транзакцией — `tests/unit/test_notification.py`, `test_process_incoming_message.py` |
+| Нет токенов в логах | structlog-фильтр `[REDACTED]` + e2e-проверки логов провайдера (нет `sk-…`/Bearer/тела запроса) — `tests/unit/test_llm_no_secrets_in_logs.py` |
+| PII-минимизация | телефонные последовательности маскируются в уведомлениях (`[телефон скрыт]`); `messages.meta` не хранит tool-arguments — `src/leads/use_case.py`, `src/tools/handoff_request.py`, `tests/unit/test_tool_handoff_request.py::test_note_phone_masked` |
+| WebSocket/группы | групповые сообщения (chat id < 0) не попадают в клиентский agent-путь; is_bot-сообщения всегда игнорируются — `tests/unit/test_staff_reply_use_case.py` |
+| Rate limiting webhook | 10 req/60s per user → 429 — `tests/unit/test_webhook_endpoint.py::test_webhook_enforces_rate_limiting` |
+| Идемпотентность webhook | уникальный natural id (tenant_id, telegram_message_id), повторная доставка не дублируется — `tests/unit/test_process_incoming_message.py::test_idempotent_deduplication_of_messages` |
+
+Категория `security` в запуске: `.venv\Scripts\python.exe -m pytest tests -m security -q` (6 тестов; полный hardening — `scripts/run_all_tests.ps1`).
+
+**Остаются открытыми (вне кода):** 152-ФЗ юридический аудит (SEC-OD-9), DPA/трансграничность с выбранным LLM-провайдером (SEC-OD-1), KMS-хранение master-ключа шифрования tenant-секретов (SEC-OD-2), retention-дефолты (DB-OD-1) и внешний пентест перед пилотом (SEC-OD-10).
+
 ## 19. Open Security Decisions
 
 | ID | Вопрос | Когда решать |

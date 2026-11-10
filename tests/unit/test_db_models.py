@@ -20,6 +20,8 @@ from src.db.models import (
     TenantStatus,
 )
 
+pytestmark = [pytest.mark.database, pytest.mark.unit]
+
 
 @pytest.mark.unit
 def test_all_13_tables_registered_in_metadata() -> None:
