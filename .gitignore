@@ -52,7 +52,8 @@ desktop.ini
 *.log
 logs/
 
-# Database dumps
+# Database dumps (Stage 8.2: real backups must never enter the repo)
+backups/
 *.sql
 *.dump
 !migrations/**/*.sql

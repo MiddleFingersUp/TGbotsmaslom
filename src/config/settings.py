@@ -107,6 +107,28 @@ class Settings(BaseSettings):
     )
 
     # Security
+    # NFR-1/NFR-2 (docs/SECURITY.md §10, §19): webhook rate limiting is
+    # configurable so prod operators can tune protection without code changes.
+    # Defaults (10 requests / 60 seconds per user) are EXACTLY the previous
+    # hard-coded values — no security level change (Stage 8.2).
+    webhook_rate_limit_max: int = Field(
+        default=10,
+        alias="WEBHOOK_RATE_LIMIT_MAX",
+        description=(
+            "Max webhook requests per user inside the sliding window (NFR-1); "
+            "exceeding it returns 429"
+        ),
+        ge=1,
+        le=10_000,
+    )
+    webhook_rate_limit_window: int = Field(
+        default=60,
+        alias="WEBHOOK_RATE_LIMIT_WINDOW",
+        description="Sliding-window size in seconds for the webhook rate limiter (NFR-2)",
+        ge=1,
+        le=86_400,
+    )
+
     webhook_secret: str | None = Field(
         default=None,
         alias="WEBHOOK_SECRET",

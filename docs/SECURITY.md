@@ -64,7 +64,7 @@
 
 - Алгоритм — authenticated encryption **AES-256-GCM** через библиотеку `cryptography` (AEAD: шифрование и аутентификация целостности в одной операции). Схема записи в БД: `key_version (int) || nonce (12 байт) || ciphertext || tag`.
 - AAD (associated data) привязывает шифротекст к владельцу — `tenant_id` и `bot_id` — защита от «пересадки» шифротекста в другой тенант.
-- Ключ шифрования **не хранится рядом с данными**: в PostgreSQL — только шифротекст; ключ — в env/внешнем хранилище (точный источник — SEC-OD-2, §19).
+- Ключ шифрования **не хранится рядом с данными**: в PostgreSQL — только шифротекст; ключ — в env/внешнем хранилище (точный источник — SEC-OD-2, §20).
 - Формат покрывает то, что уже спроектировано в схеме: `bots.token_ciphertext`, `bots.webhook_secret_ciphertext` (`docs/DATABASE.md` §4.2); длина полей рассчитывается с запасом на полный шифротекст + тег + префикс версии.
 
 **База данных (персональные данные).** Тексты сообщений, контакты и лиды хранятся в PostgreSQL в открытой форме на уровне столбцов — целостность обеспечивается:
@@ -114,7 +114,7 @@
 3. **Локализация данных:** PostgreSQL и бэкапы — только на серверах в РФ (§16); передача данных внешнему LLM-провайдеру — предмет §8.
 4. **Минимизация и маскирование:** телефон, username, имя не логируются; при отправке контекста в LLM — по возможности маскируются (§8); лид создаётся только с согласия клиента оставить контакт (PRODUCT_SPEC §10 сценарий 1).
 5. **Права субъекта:** запрос «удалите мои данные» — операционная процедура: анонимизация customer'а и снапшотов в лидах (см. `docs/DATABASE.md` §10); детали — SEC-OD-3.
-6. Документ **не является юридическим заключением**; коммерческий запуск — только после юридической проверки (см. §19 SEC-OD-9).
+6. Документ **не является юридическим заключением**; коммерческий запуск — только после юридической проверки (см. §20 SEC-OD-9).
 
 ## 8. LLM Data Privacy
 
@@ -272,14 +272,54 @@
 | Нет токенов в логах | structlog-фильтр `[REDACTED]` + e2e-проверки логов провайдера (нет `sk-…`/Bearer/тела запроса) — `tests/unit/test_llm_no_secrets_in_logs.py` |
 | PII-минимизация | телефонные последовательности маскируются в уведомлениях (`[телефон скрыт]`); `messages.meta` не хранит tool-arguments — `src/leads/use_case.py`, `src/tools/handoff_request.py`, `tests/unit/test_tool_handoff_request.py::test_note_phone_masked` |
 | WebSocket/группы | групповые сообщения (chat id < 0) не попадают в клиентский agent-путь; is_bot-сообщения всегда игнорируются — `tests/unit/test_staff_reply_use_case.py` |
-| Rate limiting webhook | 10 req/60s per user → 429 — `tests/unit/test_webhook_endpoint.py::test_webhook_enforces_rate_limiting` |
+| Rate limiting webhook | 10 req/60s per user → 429 (Stage 8.2: лимит конфигурируем через `WEBHOOK_RATE_LIMIT_MAX`/`WEBHOOK_RATE_LIMIT_WINDOW`, NFR-1/2) — `tests/unit/test_webhook_endpoint.py` |
 | Идемпотентность webhook | уникальный natural id (tenant_id, telegram_message_id), повторная доставка не дублируется — `tests/unit/test_process_incoming_message.py::test_idempotent_deduplication_of_messages` |
 
 Категория `security` в запуске: `.venv\Scripts\python.exe -m pytest tests -m security -q` (6 тестов; полный hardening — `scripts/run_all_tests.ps1`).
 
 **Остаются открытыми (вне кода):** 152-ФЗ юридический аудит (SEC-OD-9), DPA/трансграничность с выбранным LLM-провайдером (SEC-OD-1), KMS-хранение master-ключа шифрования tenant-секретов (SEC-OD-2), retention-дефолты (DB-OD-1) и внешний пентест перед пилотом (SEC-OD-10).
 
-## 19. Open Security Decisions
+## 18.2. Stage 8.2: аудит секретов в CI
+
+- `scripts/audit_secrets.py` (offline, чистый stdlib) сканирует все git-отслеживаемые текстовые файлы на OpenAI-подобные ключи, Telegram-токены, длинные high-entropy hex/base64, присваивания пароля и PEM-приватные ключи; при находках — exit 1 со МАСКИРОВАННЫМ выводом (`file:line`, первые 4/последние 3 символа).
+- Allowlist — точный, по значениям, с обоснованием каждой записи (фейковые фикстуры unit-тестов) и плейсхолдеры `.env.example`; реальный секрет даже в тестах был бы найден.
+- Шаг `python scripts/audit_secrets.py` добавлен в CI после mypy (`.github/workflows/tests.yml`, job `hardening`); тесты — `tests/unit/test_audit_secrets.py` (7 кейсов: детекция токена/ключа, детекция пароля/PEM, плейсхолдеры документации, allowlist, сканирование `.env.example`, маскирование, exit-коды через return `main()` — без subprocess).
+
+## 19. Резервное копирование (MVP-инструменты, Stage 8.2)
+
+Реализация политики `docs/DATABASE.md` §14 операторскими инструментами (работают локально сейчас и на будущем VPS; инстанс-провайдер не привязан — решение DB-OD-5 остаётся открытым).
+
+### 19.1. Команды
+
+| Операция | Команда (из корня репо) | Результат |
+|---|---|---|
+| Полный бэкап | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_backup.ps1` | `backups\YYYYMMDD_HHMMSS_tgbots.dump` (PostgreSQL custom format `-Fc`); печатает путь и размер; exit 0 при успехе |
+| Бэкап + ротация | `… db_backup.ps1 -Prune` | дополнительно удаляет старые дампы, оставляя последние 30 (`DATABASE.md` §14); автоделёт без явного флага НЕ выполняется |
+| Restore-тест | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_restore_check.ps1` | временная БД `tgbots_restore_check` (drop→create), `pg_restore` последнего дампа, сравнение счётчиков 10 ключевых таблиц с source-БД, удаление временной БД; exit 0/1 |
+| Restore-тест конкретного дампа | `… db_restore_check.ps1 -DumpFile backups\x.dump` | то же, но по явному файлу |
+| Оставить временную БД | `… db_restore_check.ps1 -KeepTemporaryDB` | не удалять `tgbots_restore_check` после проверки (для ручного осмотра) |
+| Аудит секретов | `.venv\Scripts\python.exe scripts\audit_secrets.py` | сканирует все git-отслеживаемые текстовые файлы; при находках — exit 1 и список `file:line` с МАСКИРОВАННЫМ фрагментом; на чистом репо — exit 0 |
+
+Источник подключения — `DATABASE_URL` (process env → `.env` → дефолт `postgresql://tgbots:tgbots_dev@localhost:5432/tgbots`); драйвер `+asyncpg` вырезается автоматически. Пароль БД передаётся дочерним процессам только через `PGPASSWORD` и никогда не выводится в лог. Бэкапы содержат персональные данные — обращение по §16 (доступ только оператору, хранение на серверах в РФ); `backups\` в `.gitignore`, дампы в репозиторий не попадают.
+
+### 19.2. Честная политика расхождений restore-теста
+
+Таблицы `tenants`, `bots`, `agents`, `services`, `customers`, `conversations`, `handoffs`, `token_usage` — расхождение счётчиков = FAIL (exit 1). Для `leads`/`messages` (таблицы, в которые пишет живое приложение) расхождение трактуется как ожидаемый дрейф с честным комментарием: печатаются счётчики source при проверке до/после повторного замера и счётчик восстановленной БД; при этом `restored > source` (в дампе строк больше, чем в живой БД) = FAIL.
+
+### 19.3. Планировщик (документация БЕЗ самонастройки)
+
+- **Windows:** `schtasks /Create /SC DAILY /ST 03:00 /TN "TGbots backup" /TR "powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\db_backup.ps1 -Prune"` — ставится оператором вручную.
+- **Linux (VPS):** строка в crontab оператора: `0 3 * * * cd /opt/tgbots && ./scripts/db_backup.sh -Prune` (PS-скрипт на Linux запускается через pwsh или адаптируется в .sh).
+- Restore-тест — ежемесячно, вручную оператором (`DATABASE.md` §14), календарная напоминательная механика — на усмотрение оператора.
+
+### 19.4. Чего пока НЕТ (честно)
+
+- **WAL-архивирование / point-in-time recovery** — не реализовано (привязано к решению DB-OD-5: встроенные бэкапы managed-провайдера vs pgBackRest/wal-g); планируется в этапе 8.3.
+- RPO ≤ 15 мин при текущем ежедневном full-дампе не обеспечивается (только ориентир из §14); дрейф данных между дампами закрывается только WAL/PITR.
+- Шифрование дампов на диске (`§16` п.1) — не реализовано на уровне инструментов; каталог `backups\` должен лежать на шифрованном диске.
+- Копирование дампов на второй сервер в РФ и логирование доступа к бэкапам — вне MVP-инструментов.
+
+## 20. Open Security Decisions
 
 | ID | Вопрос | Когда решать |
 |---|---|---|

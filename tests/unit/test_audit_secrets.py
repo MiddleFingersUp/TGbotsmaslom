@@ -1,0 +1,153 @@
+"""Unit tests for the offline secrets audit script (scripts/audit_secrets.py).
+
+Stage 8.2 (docs/SECURITY.md §18.1 secrets row, §19 backup tooling). Tests
+call the script's functions directly — no subprocess is spawned; exit-code
+behaviour is verified through the ``main()`` return value.
+"""
+
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_script_path = Path(__file__).resolve().parents[2] / "scripts" / "audit_secrets.py"
+_spec = importlib.util.spec_from_file_location("audit_secrets", _script_path)
+assert _spec is not None and _spec.loader is not None
+audit_secrets: Any = importlib.util.module_from_spec(_spec)
+sys.modules["audit_secrets"] = audit_secrets  # needed before exec (dataclasses)
+_spec.loader.exec_module(audit_secrets)
+
+
+def _write_tracked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
+    """Point the auditor at in-memory 'tracked files' (no real git needed)."""
+    paths = []
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        paths.append(path)
+    monkeypatch.setattr(audit_secrets, "tracked_files", lambda root: paths)
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_detects_fake_token_and_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake Telegram bot token and OpenAI-style key must both be detected."""
+    _write_tracked(
+        tmp_path,
+        monkeypatch,
+        {
+            "sample.py": (
+                'TOKEN = "1234567890:AAFakeToken_ABCDEFGHIJKLMNOPQRSTUVWX"\n'
+                'KEY = "sk-abcdef1234567890"\n'
+            )
+        },
+    )
+    findings = audit_secrets.run_audit(tmp_path)
+    rules = {finding.rule for finding in findings}
+    assert "telegram-bot-token" in rules
+    assert "openai-style-api-key" in rules
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_detects_password_and_private_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``password=`` literal and PEM private-key block must be detected."""
+    _write_tracked(
+        tmp_path,
+        monkeypatch,
+        {"creds.py": ("password=hunter2secret\n-----BEGIN PRIVATE KEY-----\n")},
+    )
+    findings = audit_secrets.run_audit(tmp_path)
+    rules = {finding.rule for finding in findings}
+    assert "password-assignment" in rules
+    assert "private-key-block" in rules
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_documentation_placeholders_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``password = …`` style doc placeholders must not be reported."""
+    _write_tracked(
+        tmp_path,
+        monkeypatch,
+        {"docs.md": "| `credential_leak` | шаблоны `sk-…`, `password = …` |\n"},
+    )
+    assert audit_secrets.run_audit(tmp_path) == []
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_allowlist_exact_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allowlisted fake fixture values are skipped; same shape elsewhere isn't."""
+    # Known test fixture value: allowed anywhere.
+    _write_tracked(tmp_path, monkeypatch, {"tests/test_x.py": 'KEY = "sk-test-offline"\n'})
+    assert audit_secrets.run_audit(tmp_path) == []
+
+    # Allowlist is exact-value: a slightly different fake key IS reported.
+    _write_tracked(tmp_path, monkeypatch, {"tests/test_x.py": 'KEY = "sk-test-offline2"\n'})
+    assert len(audit_secrets.run_audit(tmp_path)) == 1
+
+    # is_allowed(): placeholder values are allowed ONLY in .env.example.
+    assert audit_secrets.is_allowed("changeme", ".env.example")
+    assert audit_secrets.is_allowed("local-dev-key", "docs/env.example")
+    assert not audit_secrets.is_allowed("changeme", "src/config/settings.py")
+    assert not audit_secrets.is_allowed("sk-1234567890abcdefx", "tests/unit/x.py")
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_env_example_scanned_with_placeholders_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.env.example is scanned; dummy values pass, a real-looking one fails."""
+    _write_tracked(
+        tmp_path,
+        monkeypatch,
+        {
+            ".env.example": (
+                "POSTGRES_PASSWORD=changeme\n"
+                "TOKEN=1234567890:AARealLookingToken_ABCDEFGHIJKLMNOPQRS\n"
+            )
+        },
+    )
+    findings = audit_secrets.run_audit(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].rule == "telegram-bot-token"
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_masking_keeps_fragment_hides_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report output shows first 4 / last 3 chars, never the raw secret."""
+    token = "1234567890:AAFakeToken_ABCDEFGHIJKLMNOPQRSTUVWX"
+    _write_tracked(tmp_path, monkeypatch, {"sample.py": f'TOKEN = "{token}"\n'})
+    findings = audit_secrets.run_audit(tmp_path)
+    assert findings[0].masked == "1234…VWX"
+
+    report = audit_secrets.format_findings(findings)
+    assert "1234…VWX" in report
+    assert token not in report  # raw value never printed
+    # Short values are fully masked.
+    assert audit_secrets.mask("abc123") == "****"
+
+
+@pytest.mark.unit
+@pytest.mark.security
+def test_main_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() returns 1 with findings and 0 when clean (no subprocess)."""
+    _write_tracked(
+        tmp_path,
+        monkeypatch,
+        {"sample.py": 'TOKEN = "1234567890:AAFakeToken_ABCDEFGHIJKLMNOPQRSTUVWX"\n'},
+    )
+    assert audit_secrets.main(tmp_path) == 1
+
+    _write_tracked(tmp_path, monkeypatch, {"clean.py": "value = 42\n"})
+    assert audit_secrets.main(tmp_path) == 0

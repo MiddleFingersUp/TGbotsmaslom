@@ -46,11 +46,15 @@ jobs:
       - name: Mypy (strict, source only)
         run: mypy src
 
+      # Stage 8.2: offline secrets audit (pure stdlib, no service deps).
+      - name: Secrets audit
+        run: python scripts/audit_secrets.py
+
       - name: Pytest (full offline suite)
         run: pytest -q
 
       - name: Summary
         if: always()
         run: |
-          echo "Offline suite: lint + mypy + pytest"
+          echo "Offline suite: lint + mypy + secrets audit + pytest"
           echo "Category breakdown locally: scripts/run_all_tests.ps1"

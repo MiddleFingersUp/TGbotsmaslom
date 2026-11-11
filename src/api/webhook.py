@@ -1,6 +1,7 @@
 """Telegram Webhook HTTP API endpoint."""
 
 import uuid
+from functools import lru_cache
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -17,7 +18,55 @@ from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
 router = APIRouter(prefix="/api/v1/telegram")
 logger = get_logger("telegram_webhook")
 
-rate_limiter = InMemoryRateLimiter(max_requests=10, window_seconds=60)
+
+@lru_cache(maxsize=1)
+def _rate_limiter_from_settings() -> InMemoryRateLimiter:
+    """Build the webhook rate limiter from platform settings (NFR-1/NFR-2).
+
+    Defaults (10 requests / 60 seconds) are equivalent to the previous
+    hard-coded values — no security semantics change (Stage 8.2).
+    """
+    settings = get_settings()
+    return InMemoryRateLimiter(
+        max_requests=settings.webhook_rate_limit_max,
+        window_seconds=settings.webhook_rate_limit_window,
+    )
+
+
+def get_rate_limiter() -> InMemoryRateLimiter:
+    """Return the shared webhook rate limiter instance.
+
+    Tests may reconfigure the returned instance in place via
+    :func:`configure_rate_limiter` — the endpoint always uses this getter,
+    so injected limits are honored without process restart.
+    """
+    return _rate_limiter_from_settings()
+
+
+def configure_rate_limiter(
+    max_requests: int | None = None, window_seconds: int | None = None
+) -> InMemoryRateLimiter:
+    """Reconfigure the shared rate limiter (test/operator injection point).
+
+    Only changes the limits of the existing singleton; the 429 semantics and
+    response body stay identical. Call without arguments to restore the
+    values from ``get_settings()``.
+    """
+    limiter = _rate_limiter_from_settings()
+    settings = get_settings()
+    limiter.max_requests = (
+        max_requests if max_requests is not None else settings.webhook_rate_limit_max
+    )
+    limiter.window_seconds = (
+        window_seconds if window_seconds is not None else settings.webhook_rate_limit_window
+    )
+    limiter.reset()
+    return limiter
+
+
+# Module-level alias (kept for existing tests/importers): the same object
+# that ``get_rate_limiter()`` returns, so in-place reconfiguration is visible.
+rate_limiter = get_rate_limiter()
 
 
 @router.post(
@@ -76,8 +125,8 @@ async def handle_telegram_webhook(
     if not user_id or not chat_id or not message_id:
         return {"ok": True, "detail": "invalid_message_payload"}
 
-    # ─── 4. Rate Limiting ─────────────────────────────────────────
-    if not rate_limiter.is_allowed(user_id):
+    # ─── 4. Rate Limiting (NFR-1/NFR-2, limit from settings) ─────
+    if not get_rate_limiter().is_allowed(user_id):
         logger.warning("User exceeded rate limit", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

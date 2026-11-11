@@ -263,6 +263,8 @@
 6. Обновление документации: `README.md` (добавляются реальные команды запуска), `docs/SECURITY.md`, `docs/API.md`, `docs/AI_AGENT_SPEC.md`.
 7. Приёмка MVP по `PRODUCT_SPEC` §17 (10 критериев) — финальная чеклист-приёмка.
 
+**Статус Stage 8.2 (done partial):** rate limiting конфигурируем через настройки (`WEBHOOK_RATE_LIMIT_MAX`/`WEBHOOK_RATE_LIMIT_WINDOW`, NFR-1/2, дефолты эквивалентны прежнему поведению); аудит секретов — `scripts/audit_secrets.py` + шаг в CI (§18.2 SECURITY.md); операторские инструменты бэкапа и ежемесячного restore-теста — `scripts/db_backup.ps1` / `scripts/db_restore_check.ps1` (SECURITY.md §19). НЕ done: WAL-архивирование / point-in-time recovery (этап 8.3), шифрование дампов на диске, копирование на второй сервер; DB-OD-5 остаётся open.
+
 **Появляются файлы:** `docs/SECURITY.md`, `docs/API.md`, `docs/AI_AGENT_SPEC.md`, обновление `README.md`, CI/deploy-скрипты, финальная версия тестов.
 
 **Зависимости:** все предыдущие.

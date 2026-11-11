@@ -68,7 +68,45 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_all_tests.ps1
 .venv\Scripts\python.exe -m pytest tests -q          # полный регресс
 ```
 
-Категории (Stage 8.1): `security` (6), `database` (4), `agent` (62), `unit` (265 — базовая категория; остальные добавляются поверх), `integration` — зарезервирован под живые БД-тесты (сейчас offline-набор их не содержит — честно), всего 265 тестов. CI: `.github/workflows/tests.yml` — ruff + mypy + pytest (offline; CI не трогает реальные Telegram/LLM端-точки).
+Категории (Stage 8.1): `security` (17), `database` (4), `agent` (62), `unit` (277 — базовая категория; остальные добавляются поверх), `integration` — зарезервирован под живые БД-тесты (сейчас offline-набор их не содержит — честно), всего 277 тестов. CI: `.github/workflows/tests.yml` — ruff + mypy + **аудит секретов** (Stage 8.2) + pytest (offline; CI не трогает реальные Telegram/LLM-точки).
+
+## Эксплуатация (Stage 8.2: backup / restore / audit)
+
+**PostgreSQL-утилиты:** `psql`/`pg_dump`/`pg_restore` ищутся сначала в `PATH`, затем в `C:\Program Files\PostgreSQL\16\bin` (в текущей среде утилиты есть, но НЕ в PATH — скрипты сами находят полный путь; на VPS достаточно пакетов `postgresql-client-16`).
+
+Подключение: `DATABASE_URL` из env → из `.env` → дефолт `postgresql://tgbots:tgbots_dev@localhost:5432/tgbots` (суффикс `+asyncpg` вырезается автоматически). Пароль передаётся дочерним процессам только через `PGPASSWORD` и никогда не печатается. Дампы идут в `backups\` (в `.gitignore` — в репозиторий не попадают).
+
+```powershell
+# Полный логический бэкап (custom format -Fc) → backups\YYYYMMDD_HHMMSS_tgbots.dump
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_backup.ps1
+# Ожидаемый вывод: BACKUP OK: <путь> (<N> bytes); NOTE: rotation skipped…
+
+# Бэкап + ротация: оставить только последние 30 дампов (DATABASE.md §14)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_backup.ps1 -Prune
+# Ожидаемый вывод: BACKUP OK: … ; ROTATION: kept last 30 dumps (now 30 total).
+
+# Ежемесячный restore-тест: временная БД tgbots_restore_check (drop→create),
+# pg_restore дампа, сравнение счётчиков 10 таблиц (tenants, bots, agents,
+# services, customers, conversations, messages, leads, handoffs, token_usage)
+# с source-БД, затем удаление временной БД. Расхождения leads/messages
+# (живые записи после дампа) → честный комментарий, exit 0; иные
+# расхождения → exit 1.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_restore_check.ps1
+# Ожидаемый вывод (успех): таблица TABLE/SOURCE/RESTORED/STATUS …
+#   RESTORE CHECK: PASSED — all table counters match.
+# Опции: -DumpFile backups\x.dump | -KeepTemporaryDB (не удалять временную БД)
+
+# Аудит секретов во всех git-отслеживаемых файлах (offline, чистый stdlib;
+# при находках exit 1 со МАСКИРОВАННЫМ выводом file:line)
+.venv\Scripts\python.exe scripts\audit_secrets.py
+# Ожидаемый вывод (чисто): SECRETS AUDIT: OK — no suspicious secrets in
+#   tracked files (135 files scanned).
+
+# Ежемесячный restore-тест — запуск вручную оператором (см. SECURITY.md §19.3
+# для строк schtasks/cron; планировщик сам по себе НЕ настраивается).
+```
+
+Повторный restore-тест не оставляет за собой БД `tgbots_restore_check` (drop в конце каждого прогона; при сбое на середине — drop тоже выполняется).
 
 ## Live-проверки (ручные, не в CI)
 
@@ -110,7 +148,8 @@ TGbots/
 ├── docs/                      # PRODUCT_SPEC, ARCHITECTURE, DATABASE, SECURITY,
 │                              # DEVELOPMENT_PLAN, API, AI_AGENT_SPEC
 ├── scripts/                   # e2e_smoke, live_handoff_check, seed_demo_catalog,
-│                              # get_staff_chat_id, run_all_tests.ps1
+│                              # get_staff_chat_id, run_all_tests, audit_secrets,
+│                              # db_backup.ps1, db_restore_check.ps1
 ├── src/
 │   ├── api/                   # FastAPI: /health, Telegram webhook
 │   ├── agent_core/            # state machine, policies, context, validator, agent loop
