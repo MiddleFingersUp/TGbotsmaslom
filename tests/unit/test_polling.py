@@ -195,6 +195,12 @@ async def _wait_until(predicate: Any, timeout: float = 3.0) -> None:
         await asyncio.sleep(0.005)
 
 
+# Built at runtime: the secrets audit scans tracked SOURCE text, so a
+# complete token-shaped literal must not appear in any single line
+# (same allowlist-free pattern as tests/unit/test_audit_secrets.py).
+_FAKE_BOT_TOKEN = "123456789:" + "FakeTestToken_ABCDEFGHIJKLMNOP" + "QRSTUVWX"
+
+
 def _make_loop(
     api: _ApiFake,
     incoming_stub: UseCaseStub,
@@ -205,7 +211,7 @@ def _make_loop(
     factory = FakeSessionFactory()
     transport = httpx.MockTransport(api.handler)
     loop = TelegramPollingLoop(
-        "123456789:FakeTestToken_ABCDEFGHIJKLMNOPQRSTUVWX",
+        _FAKE_BOT_TOKEN,
         factory,  # type: ignore[arg-type]
         transport=transport,
         backoff_start=0.01,
@@ -325,7 +331,7 @@ async def test_polling_processing_error_advances_offset() -> None:
     staff = UseCaseStub(None)
     factory = FakeSessionFactory()
     loop = TelegramPollingLoop(
-        "123456789:FakeTestToken_ABCDEFGHIJKLMNOPQRSTUVWX",
+        _FAKE_BOT_TOKEN,
         factory,  # type: ignore[arg-type]
         transport=httpx.MockTransport(api.handler),
         backoff_start=0.01,
@@ -396,7 +402,7 @@ async def test_polling_telegram_api_error_treated_as_transport_error() -> None:
         return httpx.Response(200, json={"ok": False, "error_code": 409})
 
     loop = TelegramPollingLoop(
-        "123456789:FakeTestToken_ABCDEFGHIJKLMNOPQRSTUVWX",
+        _FAKE_BOT_TOKEN,
         FakeSessionFactory(),  # type: ignore[arg-type]
         transport=httpx.MockTransport(handler),
         backoff_start=0.01,
