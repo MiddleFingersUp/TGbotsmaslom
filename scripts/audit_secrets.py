@@ -2,7 +2,7 @@
 
 Scans every git-tracked text file for patterns that look like committed
 secrets (OpenAI-style keys, Telegram bot tokens, long high-entropy hex /
-base64 blobs, ``password=`` assignments, private-key blocks) and exits with
+base64 blobs, password assignments, private-key blocks) and exits with
 code 1 (and a list of ``file:line`` findings, secrets MASKED) when anything
 suspicious is found.
 

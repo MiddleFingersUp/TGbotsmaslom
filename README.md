@@ -68,7 +68,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_all_tests.ps1
 .venv\Scripts\python.exe -m pytest tests -q          # полный регресс
 ```
 
-Категории (Stage 8.1): `security` (17), `database` (4), `agent` (62), `unit` (277 — базовая категория; остальные добавляются поверх), `integration` — зарезервирован под живые БД-тесты (сейчас offline-набор их не содержит — честно), всего 277 тестов. CI: `.github/workflows/tests.yml` — ruff + mypy + **аудит секретов** (Stage 8.2) + pytest (offline; CI не трогает реальные Telegram/LLM-точки).
+Категории (Stage 8.1): `security` (17), `database` (4), `agent` (62), `unit` (299 — базовая категория; остальные добавляются поверх), `integration` — зарезервирован под живые БД-тесты (сейчас offline-набор их не содержит — честно), всего 299 тестов. CI: `.github/workflows/tests.yml` — ruff + mypy + **аудит секретов** (Stage 8.2) + pytest (offline; CI не трогает реальные Telegram/LLM-точки).
 
 ## Эксплуатация (Stage 8.2: backup / restore / audit)
 
@@ -107,6 +107,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db_restore_check.ps1
 ```
 
 Повторный restore-тест не оставляет за собой БД `tgbots_restore_check` (drop в конце каждого прогона; при сбое на середине — drop тоже выполняется).
+
+## Развёртывание (Stage 8.3: polling-пилот на VPS, без домена)
+
+Полная пошаговая инструкция — **[scripts/deploy_runbook.md](scripts/deploy_runbook.md)**
+(аренда VPS, ufw, Docker Engine, .env, `docker compose up`, миграции, бэкапы
+по cron, ежемесячный restore-тест, заготовка перехода на webhook). Решение
+DB-OD-5 зафиксировано в `docs/DATABASE.md` §14–15 (A-lite: ежедневный pg_dump
++ ежемесячный restore-тест; честное отклонение RPO ≈ 24 ч).
+
+Режим entrypoint'а — **аргумент, не переменная окружения**:
+
+```powershell
+# webhook-режим (по умолчанию; локально как раньше):
+uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000
+#   или: python -m src.main            (эквивалент)
+
+# polling-режим (пилот без домена/TLS; getUpdates-луп):
+.venv\Scripts\python.exe -m src.main poll
+
+python -m src.main --help    # выбор режима: webhook (default) | poll
+```
+
+На VPS polling-режим поднимается отдельным сервисом compose
+(profile `polling`): `docker compose --profile polling up -d poll`.
+
+**Polling-контур (`src/telegram_adapter/polling.py`):** тот же контур
+обработки, что webhook — общий парсер `update_parser.parse_telegram_update`,
+private-чат → `ProcessIncomingMessageUseCase`, staff-группа →
+`ProcessStaffReplyUseCase`. Честные гарантии: offset подтверждается строго
+после обработки (at-least-once), идемпотентность исключает дубль ответа,
+сбой одного update не останавливает луп, сетевые ошибки → экспоненциальный
+backoff (1→60 с), graceful shutdown по SIGINT/SIGTERM. Тесты — offline
+(`tests/unit/test_polling.py`, 22 кейса на MockTransport).
 
 ## Live-проверки (ручные, не в CI)
 
@@ -149,7 +182,7 @@ TGbots/
 │                              # DEVELOPMENT_PLAN, API, AI_AGENT_SPEC
 ├── scripts/                   # e2e_smoke, live_handoff_check, seed_demo_catalog,
 │                              # get_staff_chat_id, run_all_tests, audit_secrets,
-│                              # db_backup.ps1, db_restore_check.ps1
+│                              # db_backup.ps1, db_restore_check.ps1, deploy_runbook.md
 ├── src/
 │   ├── api/                   # FastAPI: /health, Telegram webhook
 │   ├── agent_core/            # state machine, policies, context, validator, agent loop
@@ -161,7 +194,8 @@ TGbots/
 │   ├── leads/                 # lead use case + after-commit queue
 │   ├── handoff/               # staff reply use case
 │   ├── notification/          # Notifier (Bot от вызывающего)
-│   ├── telegram_adapter/      # aiogram routers, rate limiter, schemas
+│   ├── telegram_adapter/      # aiogram routers, rate limiter, schemas,
+│   │                          # update_parser (webhook+polling), polling loop
 │   ├── tools/                 # Tool ABC, registry, real search/lead/handoff tools
 │   └── monitoring/            # structured logging + secret masking
 └── tests/                     # pytest (маркеры unit/security/agent/database)
@@ -170,9 +204,10 @@ TGbots/
 ## Известные ограничения (честно)
 
 - **LLM:** прод-провайдер не выбран (SEC-OD-1); в MVP реально подключен локальный llama-server. CUDA-бэкенд llama-server локально не поднимался — модель работает на CPU-фоллбэке, ответы «холодной» модели занимают 15–200 с (belt LLM_TIMEOUT=120).
-- **Telegram-транспорт E2E:** скрипты проверяют доставку уведомлений и ручной `/back`; реальные long-polling webhook-развёртывание и multi-tenant multi-bot токены — этап 8.2+.
+- **Polling-пилот (Stage 8.3):** без домена/TLS webhook недоступен — пилот работает через getUpdates (single-consumer, один экземпляр лупа); проверка `X-Telegram-Bot-Api-Secret-Token` в polling неприменима (см. SECURITY.md §9.2); переход на webhook — заготовка в runbook §7. Сам VPS-прогон этой итерацией НЕ выполнялся (Docker на dev-машине отсутствует) — непроверяемые шаги помечены «VPS-verify» в runbook.
+- **RPO ≈ 24 ч (DB-OD-5 = A-lite):** WAL/PITR не реализованы — честное отклонение от ориентира ≤ 15 мин из DATABASE.md §14 до отдельной задачи после MVP.
 - **RAG/pgvector:** не в MVP; интерфейс `RetrievalService` готов к замене (только `src/knowledge/search.py`).
-- **Говорствуют «booking»:** таблица `bookings` существует, инструмент записи — этап 8.2+/по заказу (нужен проверяемый backend источник).
+- **Говорствуют «booking»:** таблица `bookings` существует, инструмент записи — по заказу (нужен проверяемый backend источник).
 - **152-ФЗ** юридический аудит и итоговый DPA с LLM-провайдером — до коммерческого запуска (SEC-OD-9), вне кода.
 
 ## Документация

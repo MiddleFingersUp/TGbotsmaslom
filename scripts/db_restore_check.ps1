@@ -11,7 +11,8 @@
 #   5) drops the temporary database afterwards (unless -KeepTemporaryDB).
 #
 # Honest discrepancy policy (live app may write between dump and check):
-#   - tenants/bots/agents/services/customers/conversations/handoffs/token_usage
+#   - tenants, bots, agents, services, customers, conversations, handoffs,
+#     token_usage
 #     mismatch → FAIL (exit 1): these must not change without operator action;
 #   - leads/messages mismatch → treated as expected live drift ONLY when the
 #     source count keeps GROWING between two measurements (a comment with

@@ -40,3 +40,46 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def run_cli() -> None:
+    """CLI entrypoint (Stage 8.3): mode is an ARGUMENT, not an env var.
+
+    - ``python -m src.main`` or ``python -m src.main webhook`` — HTTP API +
+      Telegram webhook (default, unchanged);
+    - ``python -m src.main poll`` — Telegram polling loop (pilot without a
+      domain/TLS; see scripts/deploy_runbook.md).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.main",
+        description="TGbots platform entrypoint (webhook HTTP API or Telegram polling).",
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        default="webhook",
+        choices=["webhook", "poll"],
+        help="entrypoint mode: webhook (default, uvicorn HTTP API) or poll (getUpdates loop)",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "poll":
+        import asyncio
+
+        from src.telegram_adapter.polling import run_polling
+
+        try:
+            exit_code = asyncio.run(run_polling())
+        except KeyboardInterrupt:
+            exit_code = 0  # graceful Ctrl+C (Windows CLI path)
+        raise SystemExit(exit_code)
+
+    import uvicorn
+
+    uvicorn.run("src.main:create_app", factory=True, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    run_cli()

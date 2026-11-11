@@ -13,7 +13,7 @@ from src.db.models.bots import Bot
 from src.db.session import get_db_session
 from src.monitoring.logging import get_logger
 from src.telegram_adapter.rate_limiter import InMemoryRateLimiter
-from src.telegram_adapter.schemas import IncomingMessage, UserIdentity
+from src.telegram_adapter.update_parser import parse_telegram_update
 
 router = APIRouter(prefix="/api/v1/telegram")
 logger = get_logger("telegram_webhook")
@@ -107,63 +107,27 @@ async def handle_telegram_webhook(
             detail="Invalid webhook secret token",
         )
 
-    # ─── 3. Extract Message from Update ───────────────────────────
+    # ─── 3. Extract Message from Update (shared parser, Stage 8.3) ──
     msg_obj = update_data.get("message")
     if not msg_obj or not isinstance(msg_obj, dict):
         # Ignore non-message updates (e.g. inline_query) gracefully
         return {"ok": True, "detail": "non_message_update_ignored"}
 
-    from_user = msg_obj.get("from")
-    chat = msg_obj.get("chat")
-    if not from_user or not chat:
-        return {"ok": True, "detail": "missing_user_or_chat"}
-
-    user_id = from_user.get("id")
-    chat_id = chat.get("id")
-    message_id = msg_obj.get("message_id")
-
-    if not user_id or not chat_id or not message_id:
+    incoming = parse_telegram_update(update_data, bot)
+    if incoming is None:
         return {"ok": True, "detail": "invalid_message_payload"}
 
     # ─── 4. Rate Limiting (NFR-1/NFR-2, limit from settings) ─────
-    if not get_rate_limiter().is_allowed(user_id):
-        logger.warning("User exceeded rate limit", user_id=user_id)
+    if not get_rate_limiter().is_allowed(incoming.user.telegram_user_id):
+        logger.warning("User exceeded rate limit", user_id=incoming.user.telegram_user_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests. Please slow down.",
         )
 
-    # ─── 5. Normalize & Dispatch to Use Case ──────────────────────
-    text_content = msg_obj.get("text")
-    is_media = text_content is None and any(
-        k in msg_obj
-        for k in (
-            "photo",
-            "voice",
-            "video",
-            "audio",
-            "document",
-            "sticker",
-            "video_note",
-        )
-    )
+    # ─── 5b. Staff-group updates → handoff relay path (ARCHITECTURE §13) ──
 
-    incoming = IncomingMessage(
-        tenant_id=bot.tenant_id,
-        bot_id=bot.id,
-        telegram_message_id=message_id,
-        user=UserIdentity(
-            telegram_user_id=user_id,
-            telegram_chat_id=chat_id,
-            username=from_user.get("username"),
-            first_name=from_user.get("first_name"),
-            language_code=from_user.get("language_code"),
-        ),
-        text=text_content,
-        is_media=is_media,
-        is_staff_group=isinstance(chat_id, int) and chat_id < 0,
-        raw_update=update_data,
-    )
+    # ─── 5. Dispatch to Use Case (IncomingMessage already built by parser) ──
 
     # ─── 5b. Staff-group updates → handoff relay path (ARCHITECTURE §13) ──
     # Group messages (chat id < 0, e.g. internal staff chats) NEVER enter

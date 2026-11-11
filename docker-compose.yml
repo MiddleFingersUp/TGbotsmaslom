@@ -1,41 +1,85 @@
-services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - APP_ENV=dev
-      - LOG_LEVEL=INFO
-      - DATABASE_URL=postgresql+asyncpg://tgbots:tgbots_dev@postgres:5432/tgbots
-      - LLM_API_KEY=
-      - LLM_API_BASE_URL=
-      - LLM_DEFAULT_MODEL=
-      - WEBHOOK_SECRET=dev-webhook-secret
-      - ADMIN_API_TOKEN=dev-admin-token
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - .:/app
-    command: >
-      uvicorn src.main:create_app --factory
-      --host 0.0.0.0 --port 8000 --reload
+# TGbots docker-compose — VPS deploy target (Stage 8.3).
+#
+# Local dev on this repo still uses .venv + local PostgreSQL service;
+# ps1 backup/restore scripts stay local-only (docs: scripts/deploy_runbook.md).
+#
+# Services:
+#   postgres — DB + healthcheck + volumes (pgdata, /backups);
+#   app      — default entrypoint: uvicorn webhook (HTTPS webhook needs a
+#              domain+TLS — NOT configured for the pilot);
+#   poll     — Telegram polling loop (getUpdates), profile "polling"
+#              (pilot entrypoint without a domain, Stage 8.3).
+#
+# VPS verify (no Docker on the dev machine — statically checked only):
+#   docker compose up -d postgres && docker compose run --rm app alembic upgrade head
+#   docker compose up -d app          # webhook mode
+#   docker compose --profile polling up -d poll   # polling pilot mode
+#
+# Backups on VPS (runbook §6):
+#   docker compose exec -T postgres pg_dump -U tgbots -Fc tgbots > backups/<ts>_tgbots.dump
 
+services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: tgbots
-      POSTGRES_PASSWORD: tgbots_dev
-      POSTGRES_DB: tgbots
+      POSTGRES_USER: ${POSTGRES_USER:-tgbots}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tgbots_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-tgbots}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # DB is never published beyond localhost (SECURITY.md §4)
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - backups:/backups
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tgbots -d tgbots"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tgbots} -d ${POSTGRES_DB:-tgbots}"]
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  poll:
+    profiles: ["polling"]
+    build: .
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m src.main poll
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:
+  backups:
