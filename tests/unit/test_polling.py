@@ -12,6 +12,7 @@ No real network, no real DB: use cases are stubbed, sessions are fakes.
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -87,6 +88,11 @@ class UseCaseStub:
 
     async def execute(self, incoming: Any) -> Any:
         self.calls.append(incoming)
+        # None → honest shape stand-ins: polling._route reads
+        # `.is_duplicate` (client) / `.status` (staff outcome) after the
+        # call; returning None would produce AttributeError log noise.
+        if self.result is None:
+            return SimpleNamespace(is_duplicate=False, status="sent_to_client")
         return self.result
 
 
@@ -353,12 +359,18 @@ async def test_polling_network_error_backoff_then_recovery() -> None:
     api = _ApiFake([[PRIVATE_UPDATE]], fail_first=2)
     incoming, staff = UseCaseStub(None), UseCaseStub(None)
     loop, _factory = _make_loop(api, incoming, staff, _db_bot())
-    await _run_until(loop, lambda: len(incoming.calls) >= 1)
+    # Deterministic predicate: count getUpdates CALLS, not the use-case
+    # outcome. Waiting on incoming.calls would race the loop's next poll —
+    # on slow runners the graceful stop can land before the 3rd getUpdates
+    # (observed on ubuntu CI: 2 calls instead of 3). The predicate only
+    # becomes true AFTER the 3rd call exists, so the race is impossible.
+    await _run_until(loop, lambda: len(api.method_calls("getUpdates")) >= 3)
     # two failed getUpdates attempts happened before the successful one
     assert len(api.method_calls("getUpdates")) >= 3
     # backoff grew exponentially and reset back to start after success
     assert loop._backoff_start == 0.01
     assert loop._offset == 101
+    assert len(incoming.calls) == 1
 
 
 @pytest.mark.unit
